@@ -3,32 +3,12 @@
 {% block title %}Scan Task {{ scan_task.id }}{% endblock %}
 
 {% block content %}
-<div class="card shadow-sm mb-4">
-  <div class="card-body p-4">
-    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2">
-      <h1 class="h4 mb-0">Scan task #{{ scan_task.id }}</h1>
-      <span class="badge text-bg-secondary">{{ scan_task.get_status_display }}</span>
-    </div>
-    <p class="text-secondary mb-2 mt-2">Repository: {{ scan_task.repository.full_name }}</p>
-    <p class="mb-0">Matched issues: {{ scan_task.matched_issues }} / {{ scan_task.total_issues }}</p>
-  </div>
-</div>
-
-<div class="card shadow-sm">
-  <div class="card-body p-4">
-    <h2 class="h5 mb-3">Candidates in this scan</h2>
-    {% if candidates %}
-    <ul class="list-group list-group-flush">
-      {% for candidate in candidates %}
-      <li class="list-group-item px-0">
-        <div class="fw-semibold">#{{ candidate.issue_number }} {{ candidate.title }}</div>
-        <div class="small text-secondary">Confidence {{ candidate.confidence_score }} | {{ candidate.get_resolution_status_display }}</div>
-      </li>
-      {% endfor %}
-    </ul>
-    {% else %}
-    <p class="text-secondary mb-0">No candidates generated yet.</p>
-    {% endif %}
-  </div>
+<div
+  id="scan-task-live"
+  hx-get="live/"
+  hx-trigger="load, every 2s"
+  hx-swap="innerHTML"
+>
+  {% include "core/partials/scan_task_live.html" %}
 </div>
 {% endblock %}

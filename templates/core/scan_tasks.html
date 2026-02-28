@@ -11,7 +11,7 @@
         <form method="post" class="vstack gap-3">
           {% csrf_token %}
           {{ form.as_div }}
-          <button type="submit" class="btn btn-primary">Create task</button>
+          <button type="submit" class="btn btn-primary" name="action" value="create-task">Create task</button>
         </form>
       </div>
     </div>
@@ -19,35 +19,21 @@
   <div class="col-12 col-lg-7">
     <div class="card shadow-sm">
       <div class="card-body p-4">
-        <h2 class="h5 mb-3">Scan task history</h2>
-        {% if scan_tasks %}
-        <div class="table-responsive">
-          <table class="table align-middle mb-0">
-            <thead>
-              <tr>
-                <th>ID</th>
-                <th>Repository</th>
-                <th>Status</th>
-                <th>Matched</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {% for task in scan_tasks %}
-              <tr>
-                <td>#{{ task.id }}</td>
-                <td>{{ task.repository.full_name }}</td>
-                <td>{{ task.get_status_display }}</td>
-                <td>{{ task.matched_issues }}/{{ task.total_issues }}</td>
-                <td><a href="{% url 'scan-task-detail' task.id %}">View</a></td>
-              </tr>
-              {% endfor %}
-            </tbody>
-          </table>
+        <div class="d-flex justify-content-between align-items-center mb-3 gap-2 flex-wrap">
+          <h2 class="h5 mb-0">Scan task history</h2>
+          <form method="post" class="m-0">
+            {% csrf_token %}
+            <button type="submit" class="btn btn-outline-secondary btn-sm" name="action" value="rerun-all">Rerun all tasks</button>
+          </form>
         </div>
-        {% else %}
-        <p class="text-secondary mb-0">No scan tasks created yet.</p>
-        {% endif %}
+        <div
+          id="scan-task-table"
+          hx-get="table/"
+          hx-trigger="load, every 3s"
+          hx-swap="innerHTML"
+        >
+          {% include "core/partials/scan_task_table.html" %}
+        </div>
       </div>
     </div>
   </div>

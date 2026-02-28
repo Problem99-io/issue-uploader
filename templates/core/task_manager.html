@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+
+{% block title %}Task Manager{% endblock %}
+
+{% block content %}
+<div class="card shadow-sm">
+  <div class="card-body p-4">
+    <div class="d-flex justify-content-between align-items-center gap-2 flex-wrap mb-3">
+      <h1 class="h4 mb-0">Task Manager</h1>
+      <form method="post" class="m-0">
+        {% csrf_token %}
+        <button type="submit" class="btn btn-outline-secondary btn-sm" name="action" value="rerun-all">Rerun all</button>
+      </form>
+    </div>
+
+    {% if tasks %}
+    <div class="table-responsive">
+      <table class="table align-middle mb-0">
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Repository</th>
+            <th>Status</th>
+            <th>Progress</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for task in tasks %}
+          <tr>
+            <td>#{{ task.id }}</td>
+            <td>{{ task.repository.full_name }}</td>
+            <td>
+              {% if task.status == 'running' %}
+              <span class="badge text-bg-primary">{{ task.get_status_display }}</span>
+              {% elif task.status == 'completed' %}
+              <span class="badge text-bg-success">{{ task.get_status_display }}</span>
+              {% elif task.status == 'failed' %}
+              <span class="badge text-bg-danger">{{ task.get_status_display }}</span>
+              {% elif task.status == 'stopped' %}
+              <span class="badge text-bg-warning">{{ task.get_status_display }}</span>
+              {% else %}
+              <span class="badge text-bg-secondary">{{ task.get_status_display }}</span>
+              {% endif %}
+            </td>
+            <td>{{ task.matched_issues }}/{{ task.total_issues }}</td>
+            <td>
+              <div class="d-flex gap-2 flex-wrap">
+                <a class="btn btn-sm btn-outline-secondary" href="{% url 'scan-task-detail' task.id %}">View</a>
+
+                <form method="post" class="m-0">
+                  {% csrf_token %}
+                  <input type="hidden" name="task_id" value="{{ task.id }}">
+                  <button type="submit" class="btn btn-sm btn-outline-primary" name="action" value="start-task" {% if task.status == 'running' %}disabled{% endif %}>Start</button>
+                </form>
+
+                <form method="post" class="m-0">
+                  {% csrf_token %}
+                  <input type="hidden" name="task_id" value="{{ task.id }}">
+                  <button type="submit" class="btn btn-sm btn-outline-warning" name="action" value="stop-task" {% if task.status != 'running' %}disabled{% endif %}>Stop</button>
+                </form>
+
+                <form method="post" class="m-0">
+                  {% csrf_token %}
+                  <input type="hidden" name="task_id" value="{{ task.id }}">
+                  <button type="submit" class="btn btn-sm btn-outline-info" name="action" value="restart-task" {% if task.status == 'running' %}disabled{% endif %}>Restart</button>
+                </form>
+
+                <form method="post" class="m-0">
+                  {% csrf_token %}
+                  <input type="hidden" name="task_id" value="{{ task.id }}">
+                  <button type="submit" class="btn btn-sm btn-outline-danger" name="action" value="remove-task" {% if task.status == 'running' %}disabled{% endif %}>Remove</button>
+                </form>
+              </div>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <p class="text-secondary mb-0">No tasks available.</p>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

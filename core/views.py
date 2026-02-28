@@ -1,3 +1,5 @@
+import logging
+
 from django.http import JsonResponse
 from django.db.models import Count
 from django.shortcuts import get_object_or_404, redirect, render
@@ -8,6 +10,29 @@ from .forms import AgentConfigForm, GitHubApiKeyForm, RepositoryImportForm, Scan
 from .models import AgentConfig, IssueCandidate, Repository, ScanTask
 from .services.github_client import GitHubServiceError, get_repository_by_full_name, validate_github_api_key
 from .services.ollama_client import OllamaServiceError, list_models, send_message
+from .services.scan_runner import request_stop_scan_task, start_scan_task
+
+
+logger = logging.getLogger(__name__)
+
+
+def _debug_print(message: str) -> None:
+    print(f'[OLLAMA_DEBUG] {message}', flush=True)
+
+
+def _upstream_auth_headers(request) -> dict[str, str]:
+    header_map = {
+        'HTTP_AUTHORIZATION': 'Authorization',
+        'HTTP_X_PREVIEW_TOKEN': 'X-Preview-Token',
+        'HTTP_X_OPENCODE_PREVIEW_TOKEN': 'X-Opencode-Preview-Token',
+        'HTTP_X_FORWARDED_ACCESS_TOKEN': 'X-Forwarded-Access-Token',
+    }
+    headers = {}
+    for meta_key, header_name in header_map.items():
+        value = request.META.get(meta_key)
+        if value:
+            headers[header_name] = value
+    return headers
 
 
 def home(request):
@@ -98,15 +123,58 @@ def scan_task_list_create(request):
     scan_tasks = ScanTask.objects.select_related('repository').all()
 
     if request.method == 'POST':
+        action = request.POST.get('action', 'create-task')
+
+        if action == 'rerun-all':
+            rerunnable_tasks = ScanTask.objects.exclude(status=ScanTask.Status.RUNNING)
+            for task in rerunnable_tasks:
+                start_scan_task(task.id)
+            return redirect('scan-tasks')
+
         form = ScanTaskForm(request.POST)
         if form.is_valid():
-            form.save()
-            return redirect('scan-tasks')
+            scan_task = form.save()
+            start_scan_task(scan_task.id)
+            return redirect('scan-task-detail', task_id=scan_task.id)
     else:
         form = ScanTaskForm()
 
     context = {'scan_tasks': scan_tasks, 'form': form}
     return render(request, 'core/scan_tasks.html', context)
+
+
+def task_manager(request):
+    if request.method == 'POST':
+        action = request.POST.get('action', '')
+        task_id = request.POST.get('task_id', '').strip()
+
+        if action == 'rerun-all':
+            for task in ScanTask.objects.exclude(status=ScanTask.Status.RUNNING):
+                start_scan_task(task.id)
+            return redirect('task-manager')
+
+        if not task_id.isdigit():
+            return redirect('task-manager')
+
+        scan_task = get_object_or_404(ScanTask, pk=int(task_id))
+
+        if action in {'start-task', 'restart-task'} and scan_task.status != ScanTask.Status.RUNNING:
+            scan_task.cancel_requested = False
+            scan_task.save(update_fields=['cancel_requested'])
+            start_scan_task(scan_task.id)
+        elif action == 'stop-task' and scan_task.status == ScanTask.Status.RUNNING:
+            scan_task.cancel_requested = True
+            scan_task.status = ScanTask.Status.STOPPED
+            scan_task.finished_at = timezone.now()
+            scan_task.save(update_fields=['cancel_requested', 'status', 'finished_at'])
+            request_stop_scan_task(scan_task.id)
+        elif action == 'remove-task' and scan_task.status != ScanTask.Status.RUNNING:
+            scan_task.delete()
+
+        return redirect('task-manager')
+
+    tasks = ScanTask.objects.select_related('repository').all()
+    return render(request, 'core/task_manager.html', {'tasks': tasks})
 
 
 def issue_candidate_list(request):
@@ -127,8 +195,24 @@ def issue_candidate_list(request):
 def scan_task_detail(request, task_id):
     scan_task = get_object_or_404(ScanTask.objects.select_related('repository'), pk=task_id)
     candidates = scan_task.issue_candidates.all()
-    context = {'scan_task': scan_task, 'candidates': candidates}
+    issue_logs = scan_task.issue_logs.all()
+    context = {'scan_task': scan_task, 'candidates': candidates, 'issue_logs': issue_logs}
     return render(request, 'core/scan_task_detail.html', context)
+
+
+@require_GET
+def scan_task_table_partial(request):
+    scan_tasks = ScanTask.objects.select_related('repository').all()
+    return render(request, 'core/partials/scan_task_table.html', {'scan_tasks': scan_tasks})
+
+
+@require_GET
+def scan_task_live_partial(request, task_id):
+    scan_task = get_object_or_404(ScanTask.objects.select_related('repository'), pk=task_id)
+    candidates = scan_task.issue_candidates.all()
+    issue_logs = scan_task.issue_logs.all()
+    context = {'scan_task': scan_task, 'candidates': candidates, 'issue_logs': issue_logs}
+    return render(request, 'core/partials/scan_task_live.html', context)
 
 
 def htmx_status(request):
@@ -138,18 +222,60 @@ def htmx_status(request):
 
 def agent_config_list_create(request):
     configs = AgentConfig.objects.order_by('name')
+    loaded_models = []
+    model_load_status = ''
 
     if request.method == 'POST':
         form = AgentConfigForm(request.POST)
-        if form.is_valid():
-            if form.cleaned_data['is_active']:
-                AgentConfig.objects.update(is_active=False)
-            form.save()
-            return redirect('agent-configs')
+        action = request.POST.get('action', 'save-config')
+
+        if action == 'load-models':
+            if form.is_valid():
+                base_url = form.cleaned_data.get('llm_base_url', '')
+                api_key = form.cleaned_data.get('llm_api_key', '')
+                upstream_headers = _upstream_auth_headers(request)
+
+                _debug_print(
+                    (
+                        f"load-models action remote={request.META.get('REMOTE_ADDR')} "
+                        f"base_url={base_url!r} has_api_key={bool(api_key)} "
+                        f"forward_headers={sorted(upstream_headers.keys())}"
+                    )
+                )
+
+                try:
+                    loaded_models = list_models(
+                        base_url=base_url,
+                        api_key=api_key,
+                        extra_headers=upstream_headers,
+                    )
+                    if loaded_models:
+                        model_load_status = f'Loaded {len(loaded_models)} model(s).'
+                    else:
+                        model_load_status = 'No models returned.'
+                except OllamaServiceError as exc:
+                    model_load_status = str(exc)
+                    _debug_print(f'load-models action service error: {exc!r}')
+                except Exception as exc:  # pragma: no cover - debug safeguard
+                    model_load_status = f'Unexpected server error: {exc}'
+                    _debug_print(f'load-models action unexpected error: {exc!r}')
+            else:
+                model_load_status = 'Fix form errors, then try loading models again.'
+        else:
+            if form.is_valid():
+                if form.cleaned_data['is_active']:
+                    AgentConfig.objects.update(is_active=False)
+                form.save()
+                return redirect('agent-configs')
     else:
         form = AgentConfigForm()
 
-    context = {'configs': configs, 'form': form}
+    context = {
+        'configs': configs,
+        'form': form,
+        'loaded_models': loaded_models,
+        'model_load_status': model_load_status,
+    }
     return render(request, 'core/agent_configs.html', context)
 
 
@@ -157,11 +283,32 @@ def agent_config_list_create(request):
 def agent_config_models(request):
     base_url = request.GET.get('base_url', '')
     api_key = request.GET.get('api_key', '')
+    upstream_headers = _upstream_auth_headers(request)
+
+    _debug_print(
+        (
+            f"agent_config_models remote={request.META.get('REMOTE_ADDR')} "
+            f"base_url={base_url!r} has_api_key={bool(api_key)} "
+            f"forward_headers={sorted(upstream_headers.keys())}"
+        )
+    )
+    logger.warning(
+        'agent_config_models request: remote=%s base_url=%r has_api_key=%s',
+        request.META.get('REMOTE_ADDR'),
+        base_url,
+        bool(api_key),
+    )
 
     try:
-        models = list_models(base_url=base_url, api_key=api_key)
+        models = list_models(base_url=base_url, api_key=api_key, extra_headers=upstream_headers)
     except OllamaServiceError as exc:
+        _debug_print(f'agent_config_models service error: {exc!r}')
+        logger.exception('agent_config_models service error for base_url=%r', base_url)
         return JsonResponse({'ok': False, 'error': str(exc), 'models': []}, status=400)
+    except Exception as exc:  # pragma: no cover - debug safeguard
+        _debug_print(f'agent_config_models unexpected error: {exc!r}')
+        logger.exception('agent_config_models unexpected error for base_url=%r', base_url)
+        return JsonResponse({'ok': False, 'error': f'Unexpected server error: {exc}', 'models': []}, status=500)
 
     return JsonResponse({'ok': True, 'models': models})
 
@@ -172,10 +319,23 @@ def agent_config_test_message(request):
     model = request.POST.get('model', '')
     message = request.POST.get('message', '').strip()
     api_key = request.POST.get('api_key', '')
+    upstream_headers = _upstream_auth_headers(request)
 
     try:
-        reply = send_message(base_url=base_url, model=model, message=message, api_key=api_key)
+        reply = send_message(
+            base_url=base_url,
+            model=model,
+            message=message,
+            api_key=api_key,
+            extra_headers=upstream_headers,
+        )
     except OllamaServiceError as exc:
+        _debug_print(f'agent_config_test_message service error: {exc!r}')
+        logger.exception('agent_config_test_message service error for base_url=%r model=%r', base_url, model)
         return JsonResponse({'ok': False, 'error': str(exc)}, status=400)
+    except Exception as exc:  # pragma: no cover - debug safeguard
+        _debug_print(f'agent_config_test_message unexpected error: {exc!r}')
+        logger.exception('agent_config_test_message unexpected error for base_url=%r model=%r', base_url, model)
+        return JsonResponse({'ok': False, 'error': f'Unexpected server error: {exc}'}, status=500)
 
     return JsonResponse({'ok': True, 'reply': reply})

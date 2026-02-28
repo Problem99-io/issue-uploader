@@ -1,10 +1,10 @@
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 from django.test import TestCase
 from django.urls import reverse
 
 from core.forms import AgentConfigForm
-from core.models import AgentConfig, Repository
+from core.models import AgentConfig, IssueCandidate, Repository, ScanTask
 from core.services.ollama_client import (
     OllamaServiceError,
     list_models,
@@ -12,6 +12,7 @@ from core.services.ollama_client import (
     send_message,
     send_message_detailed,
 )
+from core.services.scan_runner import run_scan_task
 
 
 class AgentConfigFormTests(TestCase):
@@ -55,6 +56,7 @@ class OllamaServiceTests(TestCase):
         client_cls.assert_called_once_with(
             host='https://olamm4-ext-1998.theunserisousram.xyz',
             headers={},
+            timeout=300.0,
         )
 
     @patch('core.services.ollama_client.Client')
@@ -65,7 +67,17 @@ class OllamaServiceTests(TestCase):
 
         list_models('https://example.com/v1')
 
-        client_cls.assert_called_once_with(host='https://example.com', headers={})
+        client_cls.assert_called_once_with(host='https://example.com', headers={}, timeout=300.0)
+
+    @patch('core.services.ollama_client.Client')
+    def test_list_models_strips_common_api_paths(self, client_cls):
+        client = MagicMock()
+        client.list.return_value = {'models': []}
+        client_cls.return_value = client
+
+        list_models('https://example.com/api/tags')
+
+        client_cls.assert_called_once_with(host='https://example.com', headers={}, timeout=300.0)
 
     @patch('core.services.ollama_client.Client')
     def test_list_models_raises_service_error_on_failure(self, client_cls):
@@ -163,6 +175,23 @@ class AgentConfigOllamaViewsTests(TestCase):
         self.assertJSONEqual(
             response.content,
             {'ok': True, 'models': ['llama3.1:8b', 'llama3.2:3b']},
+        )
+
+    @patch('core.views.list_models')
+    def test_model_list_endpoint_forwards_preview_header_to_upstream(self, list_models_mock):
+        list_models_mock.return_value = []
+
+        response = self.client.get(
+            reverse('agent-config-models'),
+            {'base_url': 'olamm4-ext-1998.theunserisousram.xyz', 'api_key': ''},
+            HTTP_X_PREVIEW_TOKEN='preview-token-123',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        _, kwargs = list_models_mock.call_args
+        self.assertEqual(
+            kwargs.get('extra_headers'),
+            {'X-Preview-Token': 'preview-token-123'},
         )
 
     @patch('core.views.list_models')
@@ -274,3 +303,229 @@ class RepositoryIntegrationTests(TestCase):
         self.assertEqual(repo.owner, 'octocat')
         self.assertEqual(repo.name, 'Hello-World')
         self.assertEqual(repo.default_branch, 'main')
+
+
+class ScanTaskExecutionTests(TestCase):
+    @patch('core.views.start_scan_task')
+    def test_create_scan_task_starts_background_runner(self, start_scan_task_mock):
+        repo = Repository.objects.create(
+            owner='octocat',
+            name='Hello-World',
+            full_name='octocat/Hello-World',
+            html_url='https://github.com/octocat/Hello-World',
+            default_branch='main',
+            is_active=True,
+        )
+
+        response = self.client.post(
+            reverse('scan-tasks'),
+            {
+                'repository': repo.id,
+                'prompt_model': 'qwen3:30b',
+                'notes': 'run scan',
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        scan_task = ScanTask.objects.get(repository=repo)
+        start_scan_task_mock.assert_called_once_with(scan_task.id)
+
+    @patch('core.views.start_scan_task')
+    def test_rerun_all_tasks_starts_non_running_tasks(self, start_scan_task_mock):
+        repo = Repository.objects.create(
+            owner='octocat',
+            name='Hello-World',
+            full_name='octocat/Hello-World',
+            html_url='https://github.com/octocat/Hello-World',
+            default_branch='main',
+            is_active=True,
+        )
+        t1 = ScanTask.objects.create(repository=repo, status=ScanTask.Status.PENDING)
+        ScanTask.objects.create(repository=repo, status=ScanTask.Status.RUNNING)
+        t3 = ScanTask.objects.create(repository=repo, status=ScanTask.Status.COMPLETED)
+
+        response = self.client.post(reverse('scan-tasks'), {'action': 'rerun-all'})
+
+        self.assertEqual(response.status_code, 302)
+        start_scan_task_mock.assert_has_calls([call(t1.id), call(t3.id)], any_order=True)
+        self.assertEqual(start_scan_task_mock.call_count, 2)
+
+    @patch('core.services.scan_runner.send_message')
+    @patch('core.services.scan_runner.list_issue_comments')
+    @patch('core.services.scan_runner.list_repository_issues')
+    def test_run_scan_task_creates_candidates_and_completes(self, list_issues_mock, list_comments_mock, send_message_mock):
+        repo = Repository.objects.create(
+            owner='octocat',
+            name='Hello-World',
+            full_name='octocat/Hello-World',
+            html_url='https://github.com/octocat/Hello-World',
+            default_branch='main',
+            is_active=True,
+        )
+        AgentConfig.objects.create(
+            name='default',
+            github_api_key='ghp_test',
+            llm_provider='ollama',
+            llm_base_url='http://localhost:11434',
+            llm_model='qwen3:30b',
+            is_active=True,
+        )
+        scan_task = ScanTask.objects.create(repository=repo, prompt_model='qwen3:30b')
+
+        list_issues_mock.return_value = [
+            {
+                'number': 123,
+                'title': 'Bug: crash on startup',
+                'body': 'Steps to repro and traceback included.',
+                'state': 'open',
+                'html_url': 'https://github.com/octocat/Hello-World/issues/123',
+                'labels': ['bug'],
+            },
+            {
+                'number': 124,
+                'title': 'Docs improvement',
+                'body': 'Improve readme docs.',
+                'state': 'open',
+                'html_url': 'https://github.com/octocat/Hello-World/issues/124',
+                'labels': ['documentation'],
+            },
+        ]
+        list_comments_mock.return_value = [{'body': 'This is fixed in PR #123'}]
+        send_message_mock.side_effect = [
+            (
+                '{"include": true, "confidence": 0.91, "error_message": "AUTH-401", '
+                '"solution_code": "if (!token) return unauthorized", "framework": "express", '
+                '"language": "javascript", "explanation": "Validate auth token before access.", '
+                '"tags": ["auth", "token"]}'
+            ),
+            (
+                '{"include": false, "confidence": 0.22, "error_message": "", "solution_code": "", '
+                '"framework": "", "language": "", "explanation": "", "tags": []}'
+            ),
+        ]
+
+        run_scan_task(scan_task.id)
+
+        scan_task.refresh_from_db()
+        self.assertEqual(scan_task.status, ScanTask.Status.COMPLETED)
+        self.assertEqual(scan_task.total_issues, 2)
+        self.assertEqual(scan_task.matched_issues, 1)
+        self.assertTrue(scan_task.started_at)
+        self.assertTrue(scan_task.finished_at)
+        self.assertEqual(IssueCandidate.objects.filter(scan_task=scan_task).count(), 1)
+        candidate = IssueCandidate.objects.get(scan_task=scan_task)
+        self.assertEqual(str(candidate.confidence_score), '0.91')
+        self.assertIn('"error_message": "AUTH-401"', candidate.resolution_summary)
+        self.assertIn('"solution_code": "if (!token) return unauthorized"', candidate.resolution_summary)
+        self.assertIn('"tags": [', candidate.resolution_summary)
+
+    @patch('core.services.scan_runner.send_message')
+    @patch('core.services.scan_runner.list_issue_comments')
+    @patch('core.services.scan_runner.list_repository_issues')
+    def test_run_scan_task_continues_pagination_when_page_has_only_prs(
+        self,
+        list_issues_mock,
+        list_comments_mock,
+        send_message_mock,
+    ):
+        repo = Repository.objects.create(
+            owner='django',
+            name='django',
+            full_name='django/django',
+            html_url='https://github.com/django/django',
+            default_branch='main',
+            is_active=True,
+        )
+        AgentConfig.objects.create(
+            name='default',
+            github_api_key='ghp_test',
+            llm_provider='ollama',
+            llm_base_url='http://localhost:11434',
+            llm_model='qwen3:30b',
+            max_issues_per_scan=101,
+            is_active=True,
+        )
+        scan_task = ScanTask.objects.create(repository=repo, prompt_model='qwen3:30b')
+
+        first_page = [
+            {
+                'number': idx,
+                'title': f'PR {idx}',
+                'body': 'pull request body',
+                'state': 'open',
+                'html_url': f'https://github.com/django/django/pull/{idx}',
+                'labels': [],
+                'is_pull_request': True,
+            }
+            for idx in range(1, 101)
+        ]
+        second_page = [
+            {
+                'number': 99999,
+                'title': 'Bug: crash on sqlite migration',
+                'body': 'traceback and repro steps included',
+                'state': 'open',
+                'html_url': 'https://github.com/django/django/issues/99999',
+                'labels': ['bug'],
+                'is_pull_request': False,
+            }
+        ]
+        list_issues_mock.side_effect = [first_page, second_page]
+        list_comments_mock.return_value = [{'body': 'Related fix PR #99999'}]
+        send_message_mock.return_value = (
+            '{"include": true, "confidence": 0.84, "error_message": "MIG-500", '
+            '"solution_code": "apply migration in transaction", "framework": "django", '
+            '"language": "python", "explanation": "Wrap migration steps in transaction to avoid partial state.", '
+            '"tags": ["migration", "database"]}'
+        )
+
+        run_scan_task(scan_task.id)
+
+        scan_task.refresh_from_db()
+        self.assertEqual(scan_task.status, ScanTask.Status.COMPLETED)
+        self.assertEqual(scan_task.total_issues, 1)
+        self.assertEqual(scan_task.matched_issues, 1)
+        self.assertEqual(IssueCandidate.objects.filter(scan_task=scan_task).count(), 1)
+
+
+class TaskManagerTests(TestCase):
+    def setUp(self):
+        self.repo = Repository.objects.create(
+            owner='octocat',
+            name='Hello-World',
+            full_name='octocat/Hello-World',
+            html_url='https://github.com/octocat/Hello-World',
+            default_branch='main',
+            is_active=True,
+        )
+
+    @patch('core.views.start_scan_task')
+    def test_task_manager_start_and_restart(self, start_scan_task_mock):
+        task = ScanTask.objects.create(repository=self.repo, status=ScanTask.Status.PENDING)
+
+        response_start = self.client.post(reverse('task-manager'), {'action': 'start-task', 'task_id': task.id})
+        response_restart = self.client.post(reverse('task-manager'), {'action': 'restart-task', 'task_id': task.id})
+
+        self.assertEqual(response_start.status_code, 302)
+        self.assertEqual(response_restart.status_code, 302)
+        self.assertEqual(start_scan_task_mock.call_count, 2)
+
+    @patch('core.views.request_stop_scan_task')
+    def test_task_manager_stop_running_task(self, stop_scan_task_mock):
+        task = ScanTask.objects.create(repository=self.repo, status=ScanTask.Status.RUNNING)
+
+        response = self.client.post(reverse('task-manager'), {'action': 'stop-task', 'task_id': task.id})
+
+        self.assertEqual(response.status_code, 302)
+        stop_scan_task_mock.assert_called_once_with(task.id)
+        task.refresh_from_db()
+        self.assertEqual(task.status, ScanTask.Status.STOPPED)
+        self.assertTrue(task.cancel_requested)
+
+    def test_task_manager_remove_non_running_task(self):
+        task = ScanTask.objects.create(repository=self.repo, status=ScanTask.Status.COMPLETED)
+
+        response = self.client.post(reverse('task-manager'), {'action': 'remove-task', 'task_id': task.id})
+
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(ScanTask.objects.filter(pk=task.id).exists())

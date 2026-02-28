@@ -1,6 +1,14 @@
+import logging
 from urllib.parse import urlparse
 
 from ollama import Client, ResponseError
+
+
+logger = logging.getLogger(__name__)
+
+
+def _debug_print(message: str) -> None:
+    print(f'[OLLAMA_DEBUG] {message}', flush=True)
 
 
 class OllamaServiceError(Exception):
@@ -31,8 +39,20 @@ def _normalize_host(base_url: str) -> str:
         raise OllamaServiceError('Invalid Ollama base URL.')
 
     path = parsed.path.rstrip('/')
-    if path.endswith('/v1'):
-        path = path[:-3]
+    suffixes = (
+        '/api/tags',
+        '/api/chat',
+        '/api/generate',
+        '/api/embed',
+        '/api/embeddings',
+        '/v1/chat/completions',
+        '/v1/models',
+        '/v1',
+    )
+    for suffix in suffixes:
+        if path.endswith(suffix):
+            path = path[: -len(suffix)]
+            break
 
     if path and path != '/':
         return f'{parsed.scheme}://{parsed.netloc}{path}'
@@ -51,34 +71,46 @@ def _candidate_hosts(base_url: str) -> list[str]:
     return [_normalize_host(f'https://{value}'), _normalize_host(f'http://{value}')]
 
 
-def _build_client(host: str, api_key: str = '') -> Client:
-    headers = {}
+def _build_client(host: str, api_key: str = '', extra_headers: dict[str, str] | None = None) -> Client:
+    headers = dict(extra_headers or {})
     if api_key:
         headers['Authorization'] = f'Bearer {api_key}'
 
-    return Client(host=host, headers=headers)
+    return Client(host=host, headers=headers, timeout=300.0)
 
 
-def list_models(base_url: str, api_key: str = '') -> list[str]:
-    details = list_models_detailed(base_url=base_url, api_key=api_key)
+def list_models(base_url: str, api_key: str = '', extra_headers: dict[str, str] | None = None) -> list[str]:
+    details = list_models_detailed(base_url=base_url, api_key=api_key, extra_headers=extra_headers)
     return sorted([model['name'] for model in details if model.get('name')])
 
 
-def list_models_detailed(base_url: str, api_key: str = '') -> list[dict]:
+def list_models_detailed(
+    base_url: str,
+    api_key: str = '',
+    extra_headers: dict[str, str] | None = None,
+) -> list[dict]:
     last_exception = None
     response = None
 
     for host in _candidate_hosts(base_url):
-        client = _build_client(host, api_key)
+        client = _build_client(host, api_key, extra_headers=extra_headers)
         try:
+            _debug_print(f'list_models attempt host={host!r}')
+            logger.warning('Ollama list_models attempt host=%r', host)
             response = client.list()
             break
         except ResponseError as exc:
+            _debug_print(f'list_models response error host={host!r} error={exc!r}')
+            logger.exception('Ollama list_models response error host=%r', host)
             raise OllamaServiceError(str(exc)) from exc
         except Exception as exc:  # pragma: no cover - retry fallback
+            _debug_print(f'list_models connection error host={host!r} error={exc!r}')
+            logger.exception('Ollama list_models connection error host=%r', host)
             last_exception = exc
 
     if response is None:
+        _debug_print(f'list_models failed base_url={base_url!r}')
+        logger.exception('Ollama list_models failed for base_url=%r', base_url)
         raise OllamaServiceError('Failed to fetch Ollama models.') from last_exception
 
     response_data = _to_dict(response)
@@ -115,12 +147,33 @@ def list_models_detailed(base_url: str, api_key: str = '') -> list[dict]:
     return sorted(normalized, key=lambda item: item.get('name') or '')
 
 
-def send_message(base_url: str, model: str, message: str, api_key: str = '') -> str:
-    details = send_message_detailed(base_url=base_url, model=model, message=message, api_key=api_key)
+def send_message(
+    base_url: str,
+    model: str,
+    message: str,
+    api_key: str = '',
+    extra_headers: dict[str, str] | None = None,
+    temperature: float | None = None,
+) -> str:
+    details = send_message_detailed(
+        base_url=base_url,
+        model=model,
+        message=message,
+        api_key=api_key,
+        extra_headers=extra_headers,
+        temperature=temperature,
+    )
     return details.get('content', '').strip()
 
 
-def send_message_detailed(base_url: str, model: str, message: str, api_key: str = '') -> dict:
+def send_message_detailed(
+    base_url: str,
+    model: str,
+    message: str,
+    api_key: str = '',
+    extra_headers: dict[str, str] | None = None,
+    temperature: float | None = None,
+) -> dict:
     if not model:
         raise OllamaServiceError('Model is required.')
     if not message:
@@ -130,19 +183,32 @@ def send_message_detailed(base_url: str, model: str, message: str, api_key: str 
     response = None
 
     for host in _candidate_hosts(base_url):
-        client = _build_client(host, api_key)
+        client = _build_client(host, api_key, extra_headers=extra_headers)
         try:
+            _debug_print(f'chat attempt host={host!r} model={model!r}')
+            logger.warning('Ollama chat attempt host=%r model=%r', host, model)
+            payload = {
+                'model': model,
+                'messages': [{'role': 'user', 'content': message}],
+            }
+            if temperature is not None:
+                payload['options'] = {'temperature': float(temperature)}
             response = client.chat(
-                model=model,
-                messages=[{'role': 'user', 'content': message}],
+                **payload,
             )
             break
         except ResponseError as exc:
+            _debug_print(f'chat response error host={host!r} model={model!r} error={exc!r}')
+            logger.exception('Ollama chat response error host=%r model=%r', host, model)
             raise OllamaServiceError(str(exc)) from exc
         except Exception as exc:  # pragma: no cover - retry fallback
+            _debug_print(f'chat connection error host={host!r} model={model!r} error={exc!r}')
+            logger.exception('Ollama chat connection error host=%r model=%r', host, model)
             last_exception = exc
 
     if response is None:
+        _debug_print(f'chat failed base_url={base_url!r} model={model!r}')
+        logger.exception('Ollama chat failed for base_url=%r model=%r', base_url, model)
         raise OllamaServiceError('Failed to send message to Ollama.') from last_exception
 
     response_data = _to_dict(response)

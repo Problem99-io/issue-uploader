@@ -1,5 +1,6 @@
 import json
 from urllib import error, request
+from urllib.parse import urlencode
 
 
 class GitHubServiceError(Exception):
@@ -60,3 +61,50 @@ def get_repository_by_full_name(api_key, full_name):
         'html_url': payload.get('html_url', ''),
         'default_branch': payload.get('default_branch') or 'main',
     }
+
+
+def list_repository_issues(api_key, full_name, state='open', per_page=100, page=1):
+    query = urlencode(
+        {
+            'state': state,
+            'per_page': per_page,
+            'page': page,
+            'sort': 'updated',
+            'direction': 'desc',
+        }
+    )
+    payload = _api_get(f'/repos/{full_name}/issues?{query}', api_key)
+    issues = []
+    for item in payload:
+        issues.append(
+            {
+                'number': item.get('number'),
+                'title': item.get('title') or '',
+                'body': item.get('body') or '',
+                'state': item.get('state') or 'open',
+                'html_url': item.get('html_url') or '',
+                'labels': [label.get('name', '') for label in item.get('labels', []) if isinstance(label, dict)],
+                'is_pull_request': bool(item.get('pull_request')),
+            }
+        )
+    return issues
+
+
+def list_issue_comments(api_key, full_name, issue_number, per_page=20, page=1):
+    query = urlencode(
+        {
+            'per_page': per_page,
+            'page': page,
+            'sort': 'updated',
+            'direction': 'desc',
+        }
+    )
+    payload = _api_get(f'/repos/{full_name}/issues/{issue_number}/comments?{query}', api_key)
+    comments = []
+    for item in payload:
+        comments.append(
+            {
+                'body': (item or {}).get('body') or '',
+            }
+        )
+    return comments

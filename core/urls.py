@@ -9,7 +9,10 @@ from .views import (
     issue_candidate_list,
     repository_list_create,
     scan_task_detail,
+    scan_task_live_partial,
     scan_task_list_create,
+    scan_task_table_partial,
+    task_manager,
 )
 
 urlpatterns = [
@@ -19,7 +22,10 @@ urlpatterns = [
     path('agent-configs/test-message/', agent_config_test_message, name='agent-config-test-message'),
     path('repositories/', repository_list_create, name='repositories'),
     path('scan-tasks/', scan_task_list_create, name='scan-tasks'),
+    path('task-manager/', task_manager, name='task-manager'),
+    path('scan-tasks/table/', scan_task_table_partial, name='scan-task-table'),
     path('scan-tasks/<int:task_id>/', scan_task_detail, name='scan-task-detail'),
+    path('scan-tasks/<int:task_id>/live/', scan_task_live_partial, name='scan-task-live'),
     path('issue-candidates/', issue_candidate_list, name='issue-candidates'),
     path('htmx/status/', htmx_status, name='htmx-status'),
 ]
