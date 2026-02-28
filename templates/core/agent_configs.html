@@ -8,9 +8,76 @@
     <div class="card shadow-sm">
       <div class="card-body p-4">
         <h1 class="h4 mb-3">Add agent config</h1>
-        <form method="post" class="vstack gap-3">
+        <form method="post" class="vstack gap-3" id="agent-config-form">
           {% csrf_token %}
-          {{ form.as_div }}
+          <div>
+            {{ form.name.label_tag }}
+            {{ form.name }}
+            {{ form.name.errors }}
+          </div>
+          <div>
+            {{ form.github_api_key.label_tag }}
+            {{ form.github_api_key }}
+            {{ form.github_api_key.errors }}
+          </div>
+          <div>
+            {{ form.llm_provider.label_tag }}
+            {{ form.llm_provider }}
+            {{ form.llm_provider.errors }}
+          </div>
+          <div>
+            {{ form.llm_base_url.label_tag }}
+            {{ form.llm_base_url }}
+            {{ form.llm_base_url.errors }}
+          </div>
+          <div>
+            {{ form.llm_api_key.label_tag }}
+            {{ form.llm_api_key }}
+            {{ form.llm_api_key.errors }}
+          </div>
+          <div>
+            <label for="id_llm_model">LLM model</label>
+            <select id="id_llm_model" name="llm_model" class="form-select">
+              {% if form.llm_model.value %}
+              <option value="{{ form.llm_model.value }}" selected>{{ form.llm_model.value }}</option>
+              {% else %}
+              <option value="" selected>Select a model</option>
+              {% endif %}
+            </select>
+            {{ form.llm_model.errors }}
+            <div class="d-flex gap-2 mt-2">
+              <button type="button" class="btn btn-outline-secondary btn-sm" id="load-models-btn">Load models</button>
+              <span class="small text-secondary" id="model-load-status"></span>
+            </div>
+          </div>
+          <div>
+            {{ form.temperature.label_tag }}
+            {{ form.temperature }}
+            {{ form.temperature.errors }}
+          </div>
+          <div>
+            {{ form.max_issues_per_scan.label_tag }}
+            {{ form.max_issues_per_scan }}
+            {{ form.max_issues_per_scan.errors }}
+          </div>
+          <div>
+            {{ form.is_active.label_tag }}
+            {{ form.is_active }}
+            {{ form.is_active.errors }}
+          </div>
+
+          <div class="border rounded p-3 bg-light-subtle">
+            <h2 class="h6 mb-2">Ollama test message</h2>
+            <div class="vstack gap-2">
+              <textarea class="form-control" rows="3" id="ollama-test-message" placeholder="Write a test prompt."></textarea>
+              <div class="d-flex align-items-center gap-2">
+                <button type="button" class="btn btn-outline-primary btn-sm" id="send-test-message-btn">Send test message</button>
+                <span class="small text-secondary" id="test-message-status"></span>
+              </div>
+              <div class="small" id="test-message-reply"></div>
+            </div>
+          </div>
+
           <button type="submit" class="btn btn-primary">Save config</button>
         </form>
       </div>
@@ -50,4 +117,108 @@
     </div>
   </div>
 </div>
+<script>
+  (() => {
+    const loadModelsBtn = document.getElementById('load-models-btn');
+    const sendTestMessageBtn = document.getElementById('send-test-message-btn');
+    const modelSelect = document.getElementById('id_llm_model');
+    const baseUrlInput = document.getElementById('id_llm_base_url');
+    const apiKeyInput = document.getElementById('id_llm_api_key');
+    const statusEl = document.getElementById('model-load-status');
+    const messageInput = document.getElementById('ollama-test-message');
+    const testStatusEl = document.getElementById('test-message-status');
+    const testReplyEl = document.getElementById('test-message-reply');
+    const csrfToken = document.querySelector('input[name="csrfmiddlewaretoken"]').value;
+
+    function setText(el, value) {
+      el.textContent = value;
+    }
+
+    loadModelsBtn?.addEventListener('click', async () => {
+      const baseUrl = baseUrlInput.value.trim();
+      const apiKey = apiKeyInput.value.trim();
+
+      if (!baseUrl) {
+        setText(statusEl, 'Enter a base URL first.');
+        return;
+      }
+
+      setText(statusEl, 'Loading...');
+      const query = new URLSearchParams({ base_url: baseUrl, api_key: apiKey });
+
+      try {
+        const response = await fetch(`{% url 'agent-config-models' %}?${query.toString()}`);
+        const data = await response.json();
+
+        if (!response.ok || !data.ok) {
+          setText(statusEl, data.error || 'Could not load models.');
+          return;
+        }
+
+        modelSelect.innerHTML = '';
+        for (const model of data.models) {
+          const option = document.createElement('option');
+          option.value = model;
+          option.textContent = model;
+          modelSelect.appendChild(option);
+        }
+
+        if (data.models.length === 0) {
+          const option = document.createElement('option');
+          option.value = '';
+          option.textContent = 'No models returned';
+          modelSelect.appendChild(option);
+        }
+
+        setText(statusEl, `Loaded ${data.models.length} model(s).`);
+      } catch {
+        setText(statusEl, 'Request failed.');
+      }
+    });
+
+    sendTestMessageBtn?.addEventListener('click', async () => {
+      const baseUrl = baseUrlInput.value.trim();
+      const apiKey = apiKeyInput.value.trim();
+      const model = modelSelect.value.trim();
+      const message = messageInput.value.trim();
+
+      if (!baseUrl || !model || !message) {
+        setText(testStatusEl, 'Base URL, model, and message are required.');
+        return;
+      }
+
+      setText(testStatusEl, 'Sending...');
+      setText(testReplyEl, '');
+
+      const payload = new URLSearchParams({
+        base_url: baseUrl,
+        api_key: apiKey,
+        model,
+        message,
+      });
+
+      try {
+        const response = await fetch(`{% url 'agent-config-test-message' %}`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'X-CSRFToken': csrfToken,
+          },
+          body: payload.toString(),
+        });
+
+        const data = await response.json();
+        if (!response.ok || !data.ok) {
+          setText(testStatusEl, data.error || 'Request failed.');
+          return;
+        }
+
+        setText(testStatusEl, 'Received reply.');
+        setText(testReplyEl, data.reply || '(empty response)');
+      } catch {
+        setText(testStatusEl, 'Request failed.');
+      }
+    });
+  })();
+</script>
 {% endblock %}

@@ -33,3 +33,9 @@ class AgentConfigForm(forms.ModelForm):
             'github_api_key': forms.PasswordInput(render_value=True),
             'llm_api_key': forms.PasswordInput(render_value=True),
         }
+
+    def clean_llm_base_url(self):
+        llm_base_url = (self.cleaned_data.get('llm_base_url') or '').strip()
+        if llm_base_url and not llm_base_url.startswith(('http://', 'https://')):
+            llm_base_url = f'https://{llm_base_url}'
+        return llm_base_url

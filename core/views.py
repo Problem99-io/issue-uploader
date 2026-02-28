@@ -1,9 +1,12 @@
+from django.http import JsonResponse
 from django.db.models import Count
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
+from django.views.decorators.http import require_GET, require_POST
 
 from .forms import AgentConfigForm, RepositoryForm, ScanTaskForm
 from .models import AgentConfig, IssueCandidate, Repository, ScanTask
+from .services.ollama_client import OllamaServiceError, list_models, send_message
 
 
 def home(request):
@@ -93,3 +96,31 @@ def agent_config_list_create(request):
 
     context = {'configs': configs, 'form': form}
     return render(request, 'core/agent_configs.html', context)
+
+
+@require_GET
+def agent_config_models(request):
+    base_url = request.GET.get('base_url', '')
+    api_key = request.GET.get('api_key', '')
+
+    try:
+        models = list_models(base_url=base_url, api_key=api_key)
+    except OllamaServiceError as exc:
+        return JsonResponse({'ok': False, 'error': str(exc), 'models': []}, status=400)
+
+    return JsonResponse({'ok': True, 'models': models})
+
+
+@require_POST
+def agent_config_test_message(request):
+    base_url = request.POST.get('base_url', '')
+    model = request.POST.get('model', '')
+    message = request.POST.get('message', '').strip()
+    api_key = request.POST.get('api_key', '')
+
+    try:
+        reply = send_message(base_url=base_url, model=model, message=message, api_key=api_key)
+    except OllamaServiceError as exc:
+        return JsonResponse({'ok': False, 'error': str(exc)}, status=400)
+
+    return JsonResponse({'ok': True, 'reply': reply})
