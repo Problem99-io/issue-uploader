@@ -4,6 +4,7 @@ from django.test import TestCase
 from django.urls import reverse
 
 from core.forms import AgentConfigForm
+from core.models import AgentConfig, Repository
 from core.services.ollama_client import (
     OllamaServiceError,
     list_models,
@@ -214,3 +215,62 @@ class AgentConfigOllamaViewsTests(TestCase):
         )
         self.assertEqual(chat_response.status_code, 200)
         self.assertJSONEqual(chat_response.content, {'ok': True, 'reply': 'Hello'})
+
+
+class RepositoryIntegrationTests(TestCase):
+    def test_repository_page_disables_repository_submit_without_github_key(self):
+        response = self.client.get(reverse('repositories'))
+
+        self.assertContains(response, 'Add a GitHub API key first to unlock repository tracking.')
+        self.assertContains(response, 'name="action" value="add-repository"')
+        self.assertContains(response, 'disabled')
+
+    @patch('core.views.validate_github_api_key')
+    def test_save_github_key_creates_active_agent_config(self, validate_key_mock):
+        validate_key_mock.return_value = 'octocat'
+
+        response = self.client.post(
+            reverse('repositories'),
+            {
+                'action': 'save-github-key',
+                'github_api_key': 'ghp_test',
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        config = AgentConfig.objects.get(name='default')
+        self.assertEqual(config.github_api_key, 'ghp_test')
+        self.assertTrue(config.is_active)
+
+    @patch('core.views.get_repository_by_full_name')
+    def test_add_repository_imports_metadata_from_github(self, get_repo_mock):
+        AgentConfig.objects.create(
+            name='default',
+            github_api_key='ghp_test',
+            llm_provider='ollama',
+            llm_base_url='http://localhost:11434/v1',
+            llm_model='llama3.1:8b',
+            is_active=True,
+        )
+        get_repo_mock.return_value = {
+            'owner': 'octocat',
+            'name': 'Hello-World',
+            'full_name': 'octocat/Hello-World',
+            'html_url': 'https://github.com/octocat/Hello-World',
+            'default_branch': 'main',
+        }
+
+        response = self.client.post(
+            reverse('repositories'),
+            {
+                'action': 'add-repository',
+                'full_name': 'octocat/Hello-World',
+                'is_active': 'on',
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        repo = Repository.objects.get(full_name='octocat/Hello-World')
+        self.assertEqual(repo.owner, 'octocat')
+        self.assertEqual(repo.name, 'Hello-World')
+        self.assertEqual(repo.default_branch, 'main')

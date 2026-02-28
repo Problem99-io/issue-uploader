@@ -4,8 +4,9 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from django.views.decorators.http import require_GET, require_POST
 
-from .forms import AgentConfigForm, RepositoryForm, ScanTaskForm
+from .forms import AgentConfigForm, GitHubApiKeyForm, RepositoryImportForm, ScanTaskForm
 from .models import AgentConfig, IssueCandidate, Repository, ScanTask
+from .services.github_client import GitHubServiceError, get_repository_by_full_name, validate_github_api_key
 from .services.ollama_client import OllamaServiceError, list_models, send_message
 
 
@@ -26,16 +27,70 @@ def home(request):
 
 def repository_list_create(request):
     repositories = Repository.objects.annotate(scan_count=Count('scan_tasks')).order_by('full_name')
+    active_config = AgentConfig.objects.filter(is_active=True).first()
+    github_key = (active_config.github_api_key if active_config else '').strip()
+
+    key_form = GitHubApiKeyForm()
+    repo_form = RepositoryImportForm()
 
     if request.method == 'POST':
-        form = RepositoryForm(request.POST)
-        if form.is_valid():
-            form.save()
-            return redirect('repositories')
-    else:
-        form = RepositoryForm()
+        action = request.POST.get('action')
 
-    context = {'repositories': repositories, 'form': form}
+        if action == 'save-github-key':
+            key_form = GitHubApiKeyForm(request.POST)
+            if key_form.is_valid():
+                github_key = key_form.cleaned_data['github_api_key'].strip()
+                try:
+                    validate_github_api_key(github_key)
+                except GitHubServiceError as exc:
+                    key_form.add_error('github_api_key', str(exc))
+                else:
+                    if active_config is None:
+                        active_config, _ = AgentConfig.objects.get_or_create(
+                            name='default',
+                            defaults={
+                                'github_api_key': github_key,
+                                'is_active': True,
+                            },
+                        )
+
+                    active_config.github_api_key = github_key
+                    active_config.is_active = True
+                    active_config.save()
+                    AgentConfig.objects.exclude(pk=active_config.pk).update(is_active=False)
+                    return redirect('repositories')
+
+        elif action == 'add-repository':
+            repo_form = RepositoryImportForm(request.POST)
+            if not github_key:
+                key_form.add_error('github_api_key', 'Add a GitHub API key before adding repositories.')
+            elif repo_form.is_valid():
+                try:
+                    repo_data = get_repository_by_full_name(
+                        api_key=github_key,
+                        full_name=repo_form.cleaned_data['full_name'],
+                    )
+                except GitHubServiceError as exc:
+                    repo_form.add_error('full_name', str(exc))
+                else:
+                    Repository.objects.update_or_create(
+                        full_name=repo_data['full_name'],
+                        defaults={
+                            'owner': repo_data['owner'],
+                            'name': repo_data['name'],
+                            'html_url': repo_data['html_url'],
+                            'default_branch': repo_data['default_branch'],
+                            'is_active': repo_form.cleaned_data['is_active'],
+                        },
+                    )
+                    return redirect('repositories')
+
+    context = {
+        'repositories': repositories,
+        'key_form': key_form,
+        'repo_form': repo_form,
+        'has_github_key': bool(github_key),
+    }
     return render(request, 'core/repositories.html', context)
 
 

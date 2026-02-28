@@ -7,11 +7,29 @@
   <div class="col-12 col-lg-5">
     <div class="card shadow-sm">
       <div class="card-body p-4">
-        <h1 class="h4 mb-3">Add repository</h1>
+        <h1 class="h4 mb-3">GitHub integration</h1>
+
+        {% if has_github_key %}
+        <div class="alert alert-success py-2" role="alert">
+          GitHub API key is configured. Add repositories to start issue checks.
+        </div>
+        {% else %}
+        <p class="text-secondary">Add a GitHub API key first to unlock repository tracking.</p>
+        {% endif %}
+
+        <form method="post" class="vstack gap-3 mb-4">
+          {% csrf_token %}
+          <input type="hidden" name="action" value="save-github-key">
+          {{ key_form.as_div }}
+          <button type="submit" class="btn btn-outline-primary">Save GitHub key</button>
+        </form>
+
+        <h2 class="h5 mb-3">Add repository</h2>
         <form method="post" class="vstack gap-3">
           {% csrf_token %}
-          {{ form.as_div }}
-          <button type="submit" class="btn btn-primary">Save repository</button>
+          <input type="hidden" name="action" value="add-repository">
+          {{ repo_form.as_div }}
+          <button type="submit" class="btn btn-primary" {% if not has_github_key %}disabled{% endif %}>Save repository</button>
         </form>
       </div>
     </div>

@@ -1,0 +1,62 @@
+import json
+from urllib import error, request
+
+
+class GitHubServiceError(Exception):
+    pass
+
+
+def _api_get(path, api_key):
+    url = f'https://api.github.com{path}'
+    req = request.Request(
+        url,
+        headers={
+            'Accept': 'application/vnd.github+json',
+            'Authorization': f'Bearer {api_key}',
+            'X-GitHub-Api-Version': '2022-11-28',
+            'User-Agent': 'issue-uploader',
+        },
+        method='GET',
+    )
+
+    try:
+        with request.urlopen(req, timeout=15) as response:
+            return json.loads(response.read().decode('utf-8'))
+    except error.HTTPError as exc:
+        details = ''
+        try:
+            payload = json.loads(exc.read().decode('utf-8'))
+            details = payload.get('message', '')
+        except Exception:
+            details = ''
+        message = details or f'GitHub API request failed ({exc.code}).'
+        raise GitHubServiceError(message) from exc
+    except Exception as exc:
+        raise GitHubServiceError('Could not connect to GitHub API.') from exc
+
+
+def validate_github_api_key(api_key):
+    payload = _api_get('/user', api_key)
+    login = payload.get('login')
+    if not login:
+        raise GitHubServiceError('GitHub key is valid but user details were missing.')
+    return login
+
+
+def get_repository_by_full_name(api_key, full_name):
+    payload = _api_get(f'/repos/{full_name}', api_key)
+
+    owner = (payload.get('owner') or {}).get('login')
+    name = payload.get('name')
+    repo_full_name = payload.get('full_name')
+
+    if not owner or not name or not repo_full_name:
+        raise GitHubServiceError('GitHub response is missing repository data.')
+
+    return {
+        'owner': owner,
+        'name': name,
+        'full_name': repo_full_name,
+        'html_url': payload.get('html_url', ''),
+        'default_branch': payload.get('default_branch') or 'main',
+    }
