@@ -1,0 +1,2 @@
+Django==6.0.2
+django-htmx==1.27.0
