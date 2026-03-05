@@ -1,0 +1,12 @@
+services:
+  web:
+    build: .
+    ports:
+      - "4200:4200"
+    volumes:
+      # Persist the SQLite database across container restarts
+      - sqlite_data:/app/db.sqlite3
+    restart: unless-stopped
+
+volumes:
+  sqlite_data:
