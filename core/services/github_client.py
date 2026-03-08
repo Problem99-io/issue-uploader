@@ -7,16 +7,23 @@ class GitHubServiceError(Exception):
     pass
 
 
-def _api_get(path, api_key):
+class GitHubRateLimitError(GitHubServiceError):
+    """Raised when GitHub returns a rate limit (403/429) response."""
+    pass
+
+
+def _api_get(path, api_key, extra_headers=None):
     url = f'https://api.github.com{path}'
+    headers = {
+        'Accept': 'application/vnd.github+json',
+        'Authorization': f'Bearer {api_key}',
+        'X-GitHub-Api-Version': '2022-11-28',
+        'User-Agent': 'issue-uploader',
+    }
+    headers.update(extra_headers or {})
     req = request.Request(
         url,
-        headers={
-            'Accept': 'application/vnd.github+json',
-            'Authorization': f'Bearer {api_key}',
-            'X-GitHub-Api-Version': '2022-11-28',
-            'User-Agent': 'issue-uploader',
-        },
+        headers=headers,
         method='GET',
     )
 
@@ -31,7 +38,11 @@ def _api_get(path, api_key):
         except Exception:
             details = ''
         message = details or f'GitHub API request failed ({exc.code}).'
+        if exc.code in (403, 429) and 'rate limit' in message.lower():
+            raise GitHubRateLimitError(message) from exc
         raise GitHubServiceError(message) from exc
+    except GitHubRateLimitError:
+        raise
     except Exception as exc:
         raise GitHubServiceError('Could not connect to GitHub API.') from exc
 
@@ -108,3 +119,58 @@ def list_issue_comments(api_key, full_name, issue_number, per_page=20, page=1):
             }
         )
     return comments
+
+
+def get_issue_timeline(api_key, full_name, issue_number, per_page=100, page=1):
+    query = urlencode(
+        {
+            'per_page': per_page,
+            'page': page,
+        }
+    )
+    payload = _api_get(
+        f'/repos/{full_name}/issues/{issue_number}/timeline?{query}',
+        api_key,
+        extra_headers={'Accept': 'application/vnd.github+json'},
+    )
+    return payload if isinstance(payload, list) else []
+
+
+def find_closing_pull_request_number(api_key, full_name, issue_number):
+    timeline = get_issue_timeline(api_key, full_name, issue_number)
+    for event in timeline:
+        source_issue = ((event or {}).get('source') or {}).get('issue') or {}
+        pull_request = source_issue.get('pull_request') or {}
+        pr_url = pull_request.get('url') or ''
+        if '/pulls/' in pr_url:
+            try:
+                return int(pr_url.rstrip('/').split('/pulls/')[1])
+            except Exception:
+                continue
+    return None
+
+
+def get_pull_request(api_key, full_name, pull_number):
+    payload = _api_get(f'/repos/{full_name}/pulls/{pull_number}', api_key)
+    return {
+        'number': payload.get('number'),
+        'title': payload.get('title') or '',
+        'body': payload.get('body') or '',
+        'html_url': payload.get('html_url') or '',
+        'merged_at': payload.get('merged_at'),
+    }
+
+
+def list_pull_request_files(api_key, full_name, pull_number, per_page=100, page=1):
+    query = urlencode({'per_page': per_page, 'page': page})
+    payload = _api_get(f'/repos/{full_name}/pulls/{pull_number}/files?{query}', api_key)
+    files = []
+    for item in payload:
+        files.append(
+            {
+                'filename': item.get('filename') or '',
+                'status': item.get('status') or '',
+                'patch': item.get('patch') or '',
+            }
+        )
+    return files

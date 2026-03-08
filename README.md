@@ -21,5 +21,5 @@ Open:
 - Scan tasks: http://127.0.0.1:4200/scan-tasks/
 - Issue candidates: http://127.0.0.1:4200/issue-candidates/
 
-Use the `Agent configs` page to store Ollama/vLLM connection settings in the database.
-Use the `Repositories` page to save a GitHub API key and import repositories by `owner/name`.
+Use the `Agent configs` page to choose the AI model used for scans.
+Use the `Repositories` page to save global tokens (GitHub + Problem99) and global Ollama URL, then import repositories by `owner/name`.

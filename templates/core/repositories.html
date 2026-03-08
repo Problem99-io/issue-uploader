@@ -7,7 +7,7 @@
   <div class="col-12 col-lg-5">
     <div class="card shadow-sm">
       <div class="card-body p-4">
-        <h1 class="h4 mb-3">GitHub integration</h1>
+        <h1 class="h4 mb-3">Global integrations</h1>
 
         {% if has_github_key %}
         <div class="alert alert-success py-2" role="alert">
@@ -19,9 +19,9 @@
 
         <form method="post" class="vstack gap-3 mb-4">
           {% csrf_token %}
-          <input type="hidden" name="action" value="save-github-key">
-          {{ key_form.as_div }}
-          <button type="submit" class="btn btn-outline-primary">Save GitHub key</button>
+          <input type="hidden" name="action" value="save-global-settings">
+          {{ settings_form.as_div }}
+          <button type="submit" class="btn btn-outline-primary">Save global settings</button>
         </form>
 
         <h2 class="h5 mb-3">Add repository</h2>

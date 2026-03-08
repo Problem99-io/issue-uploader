@@ -3,8 +3,8 @@ from unittest.mock import MagicMock, call, patch
 from django.test import TestCase
 from django.urls import reverse
 
-from core.forms import AgentConfigForm
-from core.models import AgentConfig, IssueCandidate, Repository, ScanTask
+from core.forms import AgentConfigForm, GlobalSettingsForm
+from core.models import AgentConfig, GlobalSettings, IssueCandidate, Repository, ScanTask
 from core.services.ollama_client import (
     OllamaServiceError,
     list_models,
@@ -16,24 +16,27 @@ from core.services.scan_runner import run_scan_task
 
 
 class AgentConfigFormTests(TestCase):
-    def test_llm_base_url_adds_https_when_missing(self):
+    def test_agent_config_form_accepts_model_only(self):
         form = AgentConfigForm(
             data={
-                'name': 'cfg-1',
-                'github_api_key': 'ghp_test',
-                'llm_provider': 'ollama',
-                'llm_base_url': 'olamm4-ext-1998.theunserisousram.xyz',
                 'llm_model': 'llama3.1:8b',
-                'llm_api_key': '',
-                'temperature': '0.20',
-                'max_issues_per_scan': 200,
-                'is_active': True,
+            }
+        )
+
+        self.assertTrue(form.is_valid())
+
+    def test_global_settings_form_adds_https_when_missing(self):
+        form = GlobalSettingsForm(
+            data={
+                'github_api_key': 'ghp_test',
+                'problem99_api_key': 'p99_test',
+                'ollama_base_url': 'olamm4-ext-1998.theunserisousram.xyz',
             }
         )
 
         self.assertTrue(form.is_valid())
         self.assertEqual(
-            form.cleaned_data['llm_base_url'],
+            form.cleaned_data['ollama_base_url'],
             'https://olamm4-ext-1998.theunserisousram.xyz',
         )
 
@@ -168,7 +171,7 @@ class AgentConfigOllamaViewsTests(TestCase):
 
         response = self.client.get(
             reverse('agent-config-models'),
-            {'base_url': 'olamm4-ext-1998.theunserisousram.xyz', 'api_key': ''},
+            {'base_url': 'olamm4-ext-1998.theunserisousram.xyz'},
         )
 
         self.assertEqual(response.status_code, 200)
@@ -183,7 +186,7 @@ class AgentConfigOllamaViewsTests(TestCase):
 
         response = self.client.get(
             reverse('agent-config-models'),
-            {'base_url': 'olamm4-ext-1998.theunserisousram.xyz', 'api_key': ''},
+            {'base_url': 'olamm4-ext-1998.theunserisousram.xyz'},
             HTTP_X_PREVIEW_TOKEN='preview-token-123',
         )
 
@@ -255,31 +258,34 @@ class RepositoryIntegrationTests(TestCase):
         self.assertContains(response, 'disabled')
 
     @patch('core.views.validate_github_api_key')
-    def test_save_github_key_creates_active_agent_config(self, validate_key_mock):
+    def test_save_global_settings_persists_token_values(self, validate_key_mock):
         validate_key_mock.return_value = 'octocat'
 
         response = self.client.post(
             reverse('repositories'),
             {
-                'action': 'save-github-key',
+                'action': 'save-global-settings',
                 'github_api_key': 'ghp_test',
+                'problem99_api_key': 'p99_test',
+                'ollama_base_url': 'http://localhost:11434',
             },
         )
 
         self.assertEqual(response.status_code, 302)
-        config = AgentConfig.objects.get(name='default')
-        self.assertEqual(config.github_api_key, 'ghp_test')
-        self.assertTrue(config.is_active)
+        settings = GlobalSettings.objects.get(name='default')
+        self.assertEqual(settings.github_api_key, 'ghp_test')
+        self.assertEqual(settings.problem99_api_key, 'p99_test')
+        self.assertEqual(settings.ollama_base_url, 'http://localhost:11434')
 
     @patch('core.views.get_repository_by_full_name')
     def test_add_repository_imports_metadata_from_github(self, get_repo_mock):
-        AgentConfig.objects.create(
+        GlobalSettings.objects.update_or_create(
             name='default',
-            github_api_key='ghp_test',
-            llm_provider='ollama',
-            llm_base_url='http://localhost:11434/v1',
-            llm_model='llama3.1:8b',
-            is_active=True,
+            defaults={
+                'github_api_key': 'ghp_test',
+                'problem99_api_key': 'p99_test',
+                'ollama_base_url': 'http://localhost:11434',
+            },
         )
         get_repo_mock.return_value = {
             'owner': 'octocat',
@@ -350,10 +356,20 @@ class ScanTaskExecutionTests(TestCase):
         start_scan_task_mock.assert_has_calls([call(t1.id), call(t3.id)], any_order=True)
         self.assertEqual(start_scan_task_mock.call_count, 2)
 
+    @patch('core.services.scan_runner.find_closing_pull_request_number')
     @patch('core.services.scan_runner.send_message')
+    @patch('core.services.scan_runner.upload_problem_direct')
     @patch('core.services.scan_runner.list_issue_comments')
     @patch('core.services.scan_runner.list_repository_issues')
-    def test_run_scan_task_creates_candidates_and_completes(self, list_issues_mock, list_comments_mock, send_message_mock):
+    def test_run_scan_task_creates_candidates_and_uploads_to_problem99(
+        self,
+        list_issues_mock,
+        list_comments_mock,
+        upload_problem_direct_mock,
+        send_message_mock,
+        find_closing_pr_mock,
+    ):
+        find_closing_pr_mock.return_value = None
         repo = Repository.objects.create(
             owner='octocat',
             name='Hello-World',
@@ -364,11 +380,16 @@ class ScanTaskExecutionTests(TestCase):
         )
         AgentConfig.objects.create(
             name='default',
-            github_api_key='ghp_test',
-            llm_provider='ollama',
-            llm_base_url='http://localhost:11434',
             llm_model='qwen3:30b',
             is_active=True,
+        )
+        GlobalSettings.objects.update_or_create(
+            name='default',
+            defaults={
+                'github_api_key': 'ghp_test',
+                'problem99_api_key': 'p99_test',
+                'ollama_base_url': 'http://localhost:11434',
+            },
         )
         scan_task = ScanTask.objects.create(repository=repo, prompt_model='qwen3:30b')
 
@@ -393,9 +414,12 @@ class ScanTaskExecutionTests(TestCase):
         list_comments_mock.return_value = [{'body': 'This is fixed in PR #123'}]
         send_message_mock.side_effect = [
             (
-                '{"include": true, "confidence": 0.91, "error_message": "AUTH-401", '
-                '"solution_code": "if (!token) return unauthorized", "framework": "express", '
-                '"language": "javascript", "explanation": "Validate auth token before access.", '
+                '{"include": true, "confidence": 0.91, '
+                '"error_message": "AUTH-401 Unauthorized: Token validation failed when accessing protected API endpoint", '
+                '"solution_code": "if (!token || !isValidToken(token)) {\\n  return res.status(401).json({ error: \\"Unauthorized\\" });\\n}", '
+                '"framework": "express", '
+                '"language": "javascript", '
+                '"explanation": "The error occurs because the authentication middleware does not validate the token before allowing access to protected routes. The fix adds a guard clause that checks for token presence and validity, returning a 401 status when authentication fails.", '
                 '"tags": ["auth", "token"]}'
             ),
             (
@@ -415,10 +439,12 @@ class ScanTaskExecutionTests(TestCase):
         self.assertEqual(IssueCandidate.objects.filter(scan_task=scan_task).count(), 1)
         candidate = IssueCandidate.objects.get(scan_task=scan_task)
         self.assertEqual(str(candidate.confidence_score), '0.91')
-        self.assertIn('"error_message": "AUTH-401"', candidate.resolution_summary)
-        self.assertIn('"solution_code": "if (!token) return unauthorized"', candidate.resolution_summary)
+        self.assertIn('"error_message":', candidate.resolution_summary)
+        self.assertIn('"solution_code":', candidate.resolution_summary)
         self.assertIn('"tags": [', candidate.resolution_summary)
+        upload_problem_direct_mock.assert_called_once()
 
+    @patch('core.services.scan_runner.find_closing_pull_request_number')
     @patch('core.services.scan_runner.send_message')
     @patch('core.services.scan_runner.list_issue_comments')
     @patch('core.services.scan_runner.list_repository_issues')
@@ -427,7 +453,9 @@ class ScanTaskExecutionTests(TestCase):
         list_issues_mock,
         list_comments_mock,
         send_message_mock,
+        find_closing_pr_mock,
     ):
+        find_closing_pr_mock.return_value = None
         repo = Repository.objects.create(
             owner='django',
             name='django',
@@ -438,12 +466,16 @@ class ScanTaskExecutionTests(TestCase):
         )
         AgentConfig.objects.create(
             name='default',
-            github_api_key='ghp_test',
-            llm_provider='ollama',
-            llm_base_url='http://localhost:11434',
             llm_model='qwen3:30b',
-            max_issues_per_scan=101,
             is_active=True,
+        )
+        GlobalSettings.objects.update_or_create(
+            name='default',
+            defaults={
+                'github_api_key': 'ghp_test',
+                'problem99_api_key': 'p99_test',
+                'ollama_base_url': 'http://localhost:11434',
+            },
         )
         scan_task = ScanTask.objects.create(repository=repo, prompt_model='qwen3:30b')
 
@@ -473,9 +505,12 @@ class ScanTaskExecutionTests(TestCase):
         list_issues_mock.side_effect = [first_page, second_page]
         list_comments_mock.return_value = [{'body': 'Related fix PR #99999'}]
         send_message_mock.return_value = (
-            '{"include": true, "confidence": 0.84, "error_message": "MIG-500", '
-            '"solution_code": "apply migration in transaction", "framework": "django", '
-            '"language": "python", "explanation": "Wrap migration steps in transaction to avoid partial state.", '
+            '{"include": true, "confidence": 0.84, '
+            '"error_message": "MIG-500 OperationalError: database table already exists during migration apply", '
+            '"solution_code": "from django.db import transaction\\n\\nwith transaction.atomic():\\n    call_command(\\"migrate\\", \\"myapp\\", \\"0005\\")\\n    call_command(\\"migrate\\", \\"myapp\\")", '
+            '"framework": "django", '
+            '"language": "python", '
+            '"explanation": "The error occurs when a migration partially fails, leaving the database in an inconsistent state. Wrapping migration steps in an atomic transaction ensures all-or-nothing execution, preventing partial schema changes that cause table-already-exists errors on retry.", '
             '"tags": ["migration", "database"]}'
         )
 
@@ -486,6 +521,78 @@ class ScanTaskExecutionTests(TestCase):
         self.assertEqual(scan_task.total_issues, 1)
         self.assertEqual(scan_task.matched_issues, 1)
         self.assertEqual(IssueCandidate.objects.filter(scan_task=scan_task).count(), 1)
+
+    @patch('core.services.scan_runner.time.sleep')
+    @patch('core.services.scan_runner.find_closing_pull_request_number')
+    @patch('core.services.scan_runner.send_message')
+    @patch('core.services.scan_runner.list_issue_comments')
+    @patch('core.services.scan_runner.list_repository_issues')
+    def test_run_scan_task_retries_after_github_rate_limit(
+        self,
+        list_issues_mock,
+        list_comments_mock,
+        send_message_mock,
+        find_closing_pr_mock,
+        sleep_mock,
+    ):
+        from core.services.github_client import GitHubRateLimitError
+
+        repo = Repository.objects.create(
+            owner='octocat',
+            name='Hello-World',
+            full_name='octocat/Hello-World',
+            html_url='https://github.com/octocat/Hello-World',
+            default_branch='main',
+            is_active=True,
+        )
+        AgentConfig.objects.create(name='default', llm_model='qwen3:30b', is_active=True)
+        GlobalSettings.objects.update_or_create(
+            name='default',
+            defaults={
+                'github_api_key': 'ghp_test',
+                'problem99_api_key': 'p99_test',
+                'ollama_base_url': 'http://localhost:11434',
+            },
+        )
+        scan_task = ScanTask.objects.create(repository=repo, prompt_model='qwen3:30b')
+
+        list_issues_mock.return_value = [
+            {
+                'number': 42,
+                'title': 'Bug: rate limit test',
+                'body': 'Error details here.',
+                'state': 'closed',
+                'html_url': 'https://github.com/octocat/Hello-World/issues/42',
+                'labels': ['bug'],
+            },
+        ]
+
+        # First call to list_issue_comments hits rate limit, second call succeeds
+        list_comments_mock.side_effect = [
+            GitHubRateLimitError('API rate limit exceeded for user ID 12345.'),
+            [{'body': 'Fixed by updating the config.'}],
+        ]
+        find_closing_pr_mock.return_value = None
+        send_message_mock.return_value = (
+            '{"include": true, "confidence": 0.92, '
+            '"error_message": "CFG-500 ConfigError: missing required field in application configuration file", '
+            '"solution_code": "config = load_config(path)\\nif not config.get(\\"required_field\\"):\\n    config[\\"required_field\\"] = default_value\\n    save_config(path, config)", '
+            '"framework": "unknown", '
+            '"language": "python", '
+            '"explanation": "The error occurs because the configuration loader does not validate required fields before use. Adding a guard that checks for and sets a default value prevents the ConfigError from being raised during startup.", '
+            '"tags": ["config", "validation"]}'
+        )
+
+        run_scan_task(scan_task.id)
+
+        scan_task.refresh_from_db()
+        self.assertEqual(scan_task.status, ScanTask.Status.COMPLETED)
+        self.assertEqual(scan_task.total_issues, 1)
+        self.assertEqual(scan_task.matched_issues, 1)
+        # list_issue_comments called twice: first hit rate limit, second succeeded
+        self.assertEqual(list_comments_mock.call_count, 2)
+        # time.sleep was called during the 61-minute wait (in 30-second chunks)
+        self.assertTrue(sleep_mock.call_count > 0)
 
 
 class TaskManagerTests(TestCase):

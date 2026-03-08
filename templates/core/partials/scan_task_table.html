@@ -6,6 +6,7 @@
         <th>ID</th>
         <th>Repository</th>
         <th>Status</th>
+        <th>Progress</th>
         <th>Matched</th>
         <th></th>
       </tr>
@@ -18,6 +19,11 @@
         <td>
           {% if task.status == 'running' %}
           <span class="badge text-bg-primary">{{ task.get_status_display }}</span>
+          {% if task.current_phase %}
+          <div class="small text-primary mt-1" style="font-size: 0.75rem;">
+            {{ task.current_phase }}{% if task.current_issue %} &middot; #{{ task.current_issue }}{% endif %}
+          </div>
+          {% endif %}
           {% elif task.status == 'completed' %}
           <span class="badge text-bg-success">{{ task.get_status_display }}</span>
           {% elif task.status == 'failed' %}
@@ -26,6 +32,19 @@
           <span class="badge text-bg-warning">{{ task.get_status_display }}</span>
           {% else %}
           <span class="badge text-bg-secondary">{{ task.get_status_display }}</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if task.total_issues > 0 %}
+          <div class="d-flex align-items-center gap-2">
+            <div class="progress flex-grow-1" style="height: 6px; min-width: 50px;">
+              <div class="progress-bar bg-primary" role="progressbar"
+                   style="width: {% widthratio task.processed_issues task.total_issues 100 %}%"></div>
+            </div>
+            <span class="small text-nowrap">{{ task.processed_issues }}/{{ task.total_issues }}</span>
+          </div>
+          {% else %}
+          <span class="small text-secondary">--</span>
           {% endif %}
         </td>
         <td>{{ task.matched_issues }}/{{ task.total_issues }}</td>
