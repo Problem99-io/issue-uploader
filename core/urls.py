@@ -11,7 +11,9 @@ from .views import (
     scan_task_detail,
     scan_task_live_partial,
     scan_task_list_create,
+    scan_task_step_logs_partial,
     scan_task_table_partial,
+    task_manager_table_partial,
     task_manager,
 )
 
@@ -23,9 +25,11 @@ urlpatterns = [
     path('repositories/', repository_list_create, name='repositories'),
     path('scan-tasks/', scan_task_list_create, name='scan-tasks'),
     path('task-manager/', task_manager, name='task-manager'),
+    path('task-manager/table/', task_manager_table_partial, name='task-manager-table'),
     path('scan-tasks/table/', scan_task_table_partial, name='scan-task-table'),
     path('scan-tasks/<int:task_id>/', scan_task_detail, name='scan-task-detail'),
     path('scan-tasks/<int:task_id>/live/', scan_task_live_partial, name='scan-task-live'),
+    path('scan-tasks/<int:task_id>/step-logs/', scan_task_step_logs_partial, name='scan-task-step-logs'),
     path('issue-candidates/', issue_candidate_list, name='issue-candidates'),
     path('htmx/status/', htmx_status, name='htmx-status'),
 ]

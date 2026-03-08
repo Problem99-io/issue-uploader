@@ -7,34 +7,10 @@
   <div class="col-12 col-lg-5">
     <div class="card shadow-sm">
       <div class="card-body p-4">
-        <h1 class="h4 mb-3">Add agent config</h1>
+        <h1 class="h4 mb-3">AI model</h1>
+        <p class="text-secondary small">Global Ollama URL: <code>{{ ollama_base_url }}</code></p>
         <form method="post" class="vstack gap-3" id="agent-config-form">
           {% csrf_token %}
-          <div>
-            {{ form.name.label_tag }}
-            {{ form.name }}
-            {{ form.name.errors }}
-          </div>
-          <div>
-            {{ form.github_api_key.label_tag }}
-            {{ form.github_api_key }}
-            {{ form.github_api_key.errors }}
-          </div>
-          <div>
-            {{ form.llm_provider.label_tag }}
-            {{ form.llm_provider }}
-            {{ form.llm_provider.errors }}
-          </div>
-          <div>
-            {{ form.llm_base_url.label_tag }}
-            {{ form.llm_base_url }}
-            {{ form.llm_base_url.errors }}
-          </div>
-          <div>
-            {{ form.llm_api_key.label_tag }}
-            {{ form.llm_api_key }}
-            {{ form.llm_api_key.errors }}
-          </div>
           <div>
             <label for="id_llm_model">LLM model</label>
             <select id="id_llm_model" name="llm_model" class="form-select">
@@ -54,21 +30,6 @@
               <span class="small text-secondary">{{ model_load_status }}</span>
             </div>
           </div>
-          <div>
-            {{ form.temperature.label_tag }}
-            {{ form.temperature }}
-            {{ form.temperature.errors }}
-          </div>
-          <div>
-            {{ form.max_issues_per_scan.label_tag }}
-            {{ form.max_issues_per_scan }}
-            {{ form.max_issues_per_scan.errors }}
-          </div>
-          <div>
-            {{ form.is_active.label_tag }}
-            {{ form.is_active }}
-            {{ form.is_active.errors }}
-          </div>
 
           <div class="border rounded p-3 bg-light-subtle">
             <h2 class="h6 mb-2">Ollama test message</h2>
@@ -82,7 +43,7 @@
             </div>
           </div>
 
-          <button type="submit" class="btn btn-primary" name="action" value="save-config">Save config</button>
+          <button type="submit" class="btn btn-primary" name="action" value="save-config">Save model</button>
         </form>
       </div>
     </div>
@@ -90,32 +51,11 @@
   <div class="col-12 col-lg-7">
     <div class="card shadow-sm">
       <div class="card-body p-4">
-        <h2 class="h5 mb-3">Saved configs</h2>
-        {% if configs %}
-        <div class="table-responsive">
-          <table class="table align-middle mb-0">
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Provider</th>
-                <th>Model</th>
-                <th>Active</th>
-              </tr>
-            </thead>
-            <tbody>
-              {% for config in configs %}
-              <tr>
-                <td>{{ config.name }}</td>
-                <td>{{ config.get_llm_provider_display }}</td>
-                <td>{{ config.llm_model }}</td>
-                <td>{% if config.is_active %}Yes{% else %}No{% endif %}</td>
-              </tr>
-              {% endfor %}
-            </tbody>
-          </table>
-        </div>
+        <h2 class="h5 mb-3">Current model selection</h2>
+        {% if active_config %}
+          <p class="mb-0"><strong>Model:</strong> {{ active_config.llm_model }}</p>
         {% else %}
-        <p class="text-secondary mb-0">No agent configs yet.</p>
+          <p class="text-secondary mb-0">No model configured yet.</p>
         {% endif %}
       </div>
     </div>
@@ -125,8 +65,7 @@
   (() => {
     const sendTestMessageBtn = document.getElementById('send-test-message-btn');
     const modelSelect = document.getElementById('id_llm_model');
-    const baseUrlInput = document.getElementById('id_llm_base_url');
-    const apiKeyInput = document.getElementById('id_llm_api_key');
+    const baseUrlInput = { value: '{{ ollama_base_url|escapejs }}' };
     const messageInput = document.getElementById('ollama-test-message');
     const testStatusEl = document.getElementById('test-message-status');
     const testReplyEl = document.getElementById('test-message-reply');
@@ -139,7 +78,6 @@
 
     sendTestMessageBtn?.addEventListener('click', async () => {
       const baseUrl = baseUrlInput.value.trim();
-      const apiKey = apiKeyInput.value.trim();
       const model = modelSelect.value.trim();
       const message = messageInput.value.trim();
 
@@ -153,7 +91,6 @@
 
       const payload = new URLSearchParams({
         base_url: baseUrl,
-        api_key: apiKey,
         model,
         message,
       });

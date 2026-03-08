@@ -1,13 +1,6 @@
 from django import forms
 
-from .models import AgentConfig, Repository, ScanTask
-
-
-class GitHubApiKeyForm(forms.Form):
-    github_api_key = forms.CharField(
-        label='GitHub API key',
-        widget=forms.PasswordInput(render_value=True),
-    )
+from .models import AgentConfig, GlobalSettings, Repository, ScanTask
 
 
 class RepositoryForm(forms.ModelForm):
@@ -46,23 +39,33 @@ class AgentConfigForm(forms.ModelForm):
     class Meta:
         model = AgentConfig
         fields = [
-            'name',
-            'github_api_key',
-            'llm_provider',
-            'llm_base_url',
             'llm_model',
-            'llm_api_key',
-            'temperature',
-            'max_issues_per_scan',
-            'is_active',
+        ]
+        labels = {
+            'llm_model': 'Model',
+        }
+
+
+class GlobalSettingsForm(forms.ModelForm):
+    class Meta:
+        model = GlobalSettings
+        fields = [
+            'github_api_key',
+            'problem99_api_key',
+            'ollama_base_url',
         ]
         widgets = {
             'github_api_key': forms.PasswordInput(render_value=True),
-            'llm_api_key': forms.PasswordInput(render_value=True),
+            'problem99_api_key': forms.PasswordInput(render_value=True),
+        }
+        labels = {
+            'github_api_key': 'GitHub API key',
+            'problem99_api_key': 'Problem99 API key',
+            'ollama_base_url': 'Global Ollama URL',
         }
 
-    def clean_llm_base_url(self):
-        llm_base_url = (self.cleaned_data.get('llm_base_url') or '').strip()
-        if llm_base_url and not llm_base_url.startswith(('http://', 'https://')):
-            llm_base_url = f'https://{llm_base_url}'
-        return llm_base_url
+    def clean_ollama_base_url(self):
+        ollama_base_url = (self.cleaned_data.get('ollama_base_url') or '').strip()
+        if ollama_base_url and not ollama_base_url.startswith(('http://', 'https://')):
+            ollama_base_url = f'https://{ollama_base_url}'
+        return ollama_base_url

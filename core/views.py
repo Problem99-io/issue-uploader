@@ -1,4 +1,5 @@
 import logging
+import math
 
 from django.http import JsonResponse
 from django.db.models import Count
@@ -6,14 +7,30 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from django.views.decorators.http import require_GET, require_POST
 
-from .forms import AgentConfigForm, GitHubApiKeyForm, RepositoryImportForm, ScanTaskForm
-from .models import AgentConfig, IssueCandidate, Repository, ScanTask
+from .forms import AgentConfigForm, GlobalSettingsForm, RepositoryImportForm, ScanTaskForm
+from .models import AgentConfig, GlobalSettings, IssueCandidate, Repository, ScanStepLog, ScanTask
 from .services.github_client import GitHubServiceError, get_repository_by_full_name, validate_github_api_key
 from .services.ollama_client import OllamaServiceError, list_models, send_message
 from .services.scan_runner import request_stop_scan_task, start_scan_task
 
 
 logger = logging.getLogger(__name__)
+
+
+def _compute_throughput(scan_task):
+    """Compute issues/min and uploads/min for a scan task. Returns (issues_per_min, uploads_per_min) or (None, None)."""
+    if not scan_task.started_at or scan_task.processed_issues == 0:
+        return None, None
+
+    end_time = scan_task.finished_at or timezone.now()
+    elapsed_seconds = (end_time - scan_task.started_at).total_seconds()
+    if elapsed_seconds < 1:
+        return None, None
+
+    elapsed_minutes = elapsed_seconds / 60.0
+    issues_per_min = round(scan_task.processed_issues / elapsed_minutes, 1)
+    uploads_per_min = round(scan_task.uploaded_issues / elapsed_minutes, 1) if scan_task.uploaded_issues else None
+    return issues_per_min, uploads_per_min
 
 
 def _debug_print(message: str) -> None:
@@ -52,43 +69,35 @@ def home(request):
 
 def repository_list_create(request):
     repositories = Repository.objects.annotate(scan_count=Count('scan_tasks')).order_by('full_name')
-    active_config = AgentConfig.objects.filter(is_active=True).first()
-    github_key = (active_config.github_api_key if active_config else '').strip()
+    global_settings, _ = GlobalSettings.objects.get_or_create(name='default')
+    github_key = (global_settings.github_api_key or '').strip()
 
-    key_form = GitHubApiKeyForm()
+    settings_form = GlobalSettingsForm(instance=global_settings)
     repo_form = RepositoryImportForm()
 
     if request.method == 'POST':
         action = request.POST.get('action')
 
-        if action == 'save-github-key':
-            key_form = GitHubApiKeyForm(request.POST)
-            if key_form.is_valid():
-                github_key = key_form.cleaned_data['github_api_key'].strip()
-                try:
-                    validate_github_api_key(github_key)
-                except GitHubServiceError as exc:
-                    key_form.add_error('github_api_key', str(exc))
+        if action == 'save-global-settings':
+            settings_form = GlobalSettingsForm(request.POST, instance=global_settings)
+            if settings_form.is_valid():
+                github_key = settings_form.cleaned_data['github_api_key'].strip()
+                if github_key:
+                    try:
+                        validate_github_api_key(github_key)
+                    except GitHubServiceError as exc:
+                        settings_form.add_error('github_api_key', str(exc))
+                    else:
+                        settings_form.save()
+                        return redirect('repositories')
                 else:
-                    if active_config is None:
-                        active_config, _ = AgentConfig.objects.get_or_create(
-                            name='default',
-                            defaults={
-                                'github_api_key': github_key,
-                                'is_active': True,
-                            },
-                        )
-
-                    active_config.github_api_key = github_key
-                    active_config.is_active = True
-                    active_config.save()
-                    AgentConfig.objects.exclude(pk=active_config.pk).update(is_active=False)
+                    settings_form.save()
                     return redirect('repositories')
 
         elif action == 'add-repository':
             repo_form = RepositoryImportForm(request.POST)
             if not github_key:
-                key_form.add_error('github_api_key', 'Add a GitHub API key before adding repositories.')
+                settings_form.add_error('github_api_key', 'Add a GitHub API key before adding repositories.')
             elif repo_form.is_valid():
                 try:
                     repo_data = get_repository_by_full_name(
@@ -112,7 +121,7 @@ def repository_list_create(request):
 
     context = {
         'repositories': repositories,
-        'key_form': key_form,
+        'settings_form': settings_form,
         'repo_form': repo_form,
         'has_github_key': bool(github_key),
     }
@@ -177,6 +186,12 @@ def task_manager(request):
     return render(request, 'core/task_manager.html', {'tasks': tasks})
 
 
+@require_GET
+def task_manager_table_partial(request):
+    tasks = ScanTask.objects.select_related('repository').all()
+    return render(request, 'core/partials/task_manager_table.html', {'tasks': tasks})
+
+
 def issue_candidate_list(request):
     scan_task_id = request.GET.get('scan_task')
     candidates = IssueCandidate.objects.select_related('scan_task', 'scan_task__repository')
@@ -196,7 +211,16 @@ def scan_task_detail(request, task_id):
     scan_task = get_object_or_404(ScanTask.objects.select_related('repository'), pk=task_id)
     candidates = scan_task.issue_candidates.all()
     issue_logs = scan_task.issue_logs.all()
-    context = {'scan_task': scan_task, 'candidates': candidates, 'issue_logs': issue_logs}
+    step_logs = scan_task.step_logs.order_by('-created_at')[:100]
+    issues_per_min, uploads_per_min = _compute_throughput(scan_task)
+    context = {
+        'scan_task': scan_task,
+        'candidates': candidates,
+        'issue_logs': issue_logs,
+        'step_logs': step_logs,
+        'throughput_issues_per_min': issues_per_min,
+        'throughput_uploads_per_min': uploads_per_min,
+    }
     return render(request, 'core/scan_task_detail.html', context)
 
 
@@ -211,7 +235,16 @@ def scan_task_live_partial(request, task_id):
     scan_task = get_object_or_404(ScanTask.objects.select_related('repository'), pk=task_id)
     candidates = scan_task.issue_candidates.all()
     issue_logs = scan_task.issue_logs.all()
-    context = {'scan_task': scan_task, 'candidates': candidates, 'issue_logs': issue_logs}
+    step_logs = scan_task.step_logs.order_by('-created_at')[:100]
+    issues_per_min, uploads_per_min = _compute_throughput(scan_task)
+    context = {
+        'scan_task': scan_task,
+        'candidates': candidates,
+        'issue_logs': issue_logs,
+        'step_logs': step_logs,
+        'throughput_issues_per_min': issues_per_min,
+        'throughput_uploads_per_min': uploads_per_min,
+    }
     return render(request, 'core/partials/scan_task_live.html', context)
 
 
@@ -220,8 +253,18 @@ def htmx_status(request):
     return render(request, 'core/partials/status.html', context)
 
 
+@require_GET
+def scan_task_step_logs_partial(request, task_id):
+    scan_task = get_object_or_404(ScanTask, pk=task_id)
+    step_logs = scan_task.step_logs.order_by('-created_at')[:100]
+    context = {'scan_task': scan_task, 'step_logs': step_logs}
+    return render(request, 'core/partials/scan_step_logs.html', context)
+
+
 def agent_config_list_create(request):
-    configs = AgentConfig.objects.order_by('name')
+    configs = AgentConfig.objects.order_by('-updated_at')
+    active_config = configs.first()
+    global_settings, _ = GlobalSettings.objects.get_or_create(name='default')
     loaded_models = []
     model_load_status = ''
 
@@ -230,51 +273,53 @@ def agent_config_list_create(request):
         action = request.POST.get('action', 'save-config')
 
         if action == 'load-models':
-            if form.is_valid():
-                base_url = form.cleaned_data.get('llm_base_url', '')
-                api_key = form.cleaned_data.get('llm_api_key', '')
-                upstream_headers = _upstream_auth_headers(request)
+            base_url = (global_settings.ollama_base_url or '').strip()
+            upstream_headers = _upstream_auth_headers(request)
 
-                _debug_print(
-                    (
-                        f"load-models action remote={request.META.get('REMOTE_ADDR')} "
-                        f"base_url={base_url!r} has_api_key={bool(api_key)} "
-                        f"forward_headers={sorted(upstream_headers.keys())}"
-                    )
+            _debug_print(
+                (
+                    f"load-models action remote={request.META.get('REMOTE_ADDR')} "
+                    f"base_url={base_url!r} "
+                    f"forward_headers={sorted(upstream_headers.keys())}"
                 )
+            )
 
-                try:
-                    loaded_models = list_models(
-                        base_url=base_url,
-                        api_key=api_key,
-                        extra_headers=upstream_headers,
-                    )
-                    if loaded_models:
-                        model_load_status = f'Loaded {len(loaded_models)} model(s).'
-                    else:
-                        model_load_status = 'No models returned.'
-                except OllamaServiceError as exc:
-                    model_load_status = str(exc)
-                    _debug_print(f'load-models action service error: {exc!r}')
-                except Exception as exc:  # pragma: no cover - debug safeguard
-                    model_load_status = f'Unexpected server error: {exc}'
-                    _debug_print(f'load-models action unexpected error: {exc!r}')
-            else:
-                model_load_status = 'Fix form errors, then try loading models again.'
+            try:
+                loaded_models = list_models(
+                    base_url=base_url,
+                    extra_headers=upstream_headers,
+                )
+                if loaded_models:
+                    model_load_status = f'Loaded {len(loaded_models)} model(s).'
+                else:
+                    model_load_status = 'No models returned.'
+            except OllamaServiceError as exc:
+                model_load_status = str(exc)
+                _debug_print(f'load-models action service error: {exc!r}')
+            except Exception as exc:  # pragma: no cover - debug safeguard
+                model_load_status = f'Unexpected server error: {exc}'
+                _debug_print(f'load-models action unexpected error: {exc!r}')
         else:
             if form.is_valid():
-                if form.cleaned_data['is_active']:
-                    AgentConfig.objects.update(is_active=False)
-                form.save()
+                config = active_config
+                if config is None:
+                    config = AgentConfig.objects.create(name='default', llm_model=form.cleaned_data['llm_model'], is_active=True)
+                else:
+                    config.llm_model = form.cleaned_data['llm_model']
+                    config.is_active = True
+                    config.save(update_fields=['llm_model', 'is_active', 'updated_at'])
+                AgentConfig.objects.exclude(pk=config.pk).update(is_active=False)
                 return redirect('agent-configs')
     else:
-        form = AgentConfigForm()
+        form = AgentConfigForm(instance=active_config)
 
     context = {
         'configs': configs,
+        'active_config': active_config,
         'form': form,
         'loaded_models': loaded_models,
         'model_load_status': model_load_status,
+        'ollama_base_url': global_settings.ollama_base_url,
     }
     return render(request, 'core/agent_configs.html', context)
 
@@ -282,13 +327,12 @@ def agent_config_list_create(request):
 @require_GET
 def agent_config_models(request):
     base_url = request.GET.get('base_url', '')
-    api_key = request.GET.get('api_key', '')
     upstream_headers = _upstream_auth_headers(request)
 
     _debug_print(
         (
             f"agent_config_models remote={request.META.get('REMOTE_ADDR')} "
-            f"base_url={base_url!r} has_api_key={bool(api_key)} "
+            f"base_url={base_url!r} "
             f"forward_headers={sorted(upstream_headers.keys())}"
         )
     )
@@ -296,11 +340,11 @@ def agent_config_models(request):
         'agent_config_models request: remote=%s base_url=%r has_api_key=%s',
         request.META.get('REMOTE_ADDR'),
         base_url,
-        bool(api_key),
+        False,
     )
 
     try:
-        models = list_models(base_url=base_url, api_key=api_key, extra_headers=upstream_headers)
+        models = list_models(base_url=base_url, extra_headers=upstream_headers)
     except OllamaServiceError as exc:
         _debug_print(f'agent_config_models service error: {exc!r}')
         logger.exception('agent_config_models service error for base_url=%r', base_url)
@@ -318,7 +362,6 @@ def agent_config_test_message(request):
     base_url = request.POST.get('base_url', '')
     model = request.POST.get('model', '')
     message = request.POST.get('message', '').strip()
-    api_key = request.POST.get('api_key', '')
     upstream_headers = _upstream_auth_headers(request)
 
     try:
@@ -326,7 +369,6 @@ def agent_config_test_message(request):
             base_url=base_url,
             model=model,
             message=message,
-            api_key=api_key,
             extra_headers=upstream_headers,
         )
     except OllamaServiceError as exc:

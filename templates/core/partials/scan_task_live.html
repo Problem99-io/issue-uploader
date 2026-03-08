@@ -15,20 +15,90 @@
       {% endif %}
     </div>
     <p class="text-secondary mb-2 mt-2">Repository: {{ scan_task.repository.full_name }}</p>
-    <p class="mb-1">Matched issues: {{ scan_task.matched_issues }} / {{ scan_task.total_issues }}</p>
+
+    {% if scan_task.current_phase %}
+    <div class="mb-2">
+      <span class="small fw-semibold text-primary">{{ scan_task.current_phase }}</span>
+      {% if scan_task.current_issue %}
+      <span class="small text-secondary">&middot; issue #{{ scan_task.current_issue }}</span>
+      {% endif %}
+    </div>
+    {% endif %}
+
+    {% if scan_task.total_issues > 0 %}
+    <div class="mb-2">
+      <div class="d-flex justify-content-between small mb-1">
+        <span>Progress: {{ scan_task.processed_issues }} / {{ scan_task.total_issues }} issues</span>
+        <span>{% widthratio scan_task.processed_issues scan_task.total_issues 100 %}%</span>
+      </div>
+      <div class="progress" style="height: 8px;">
+        <div class="progress-bar bg-primary" role="progressbar"
+             style="width: {% widthratio scan_task.processed_issues scan_task.total_issues 100 %}%"
+             aria-valuenow="{{ scan_task.processed_issues }}"
+             aria-valuemin="0"
+             aria-valuemax="{{ scan_task.total_issues }}"></div>
+      </div>
+    </div>
+    {% endif %}
+
+    <div class="row g-2 mt-1">
+      <div class="col-auto">
+        <span class="badge text-bg-success">Matched: {{ scan_task.matched_issues }}</span>
+      </div>
+      <div class="col-auto">
+        <span class="badge text-bg-info">Uploaded: {{ scan_task.uploaded_issues }}</span>
+      </div>
+      <div class="col-auto">
+        <span class="badge text-bg-secondary">Skipped: {{ scan_task.skipped_issues }}</span>
+      </div>
+      <div class="col-auto">
+        <span class="badge text-bg-danger">Errors: {{ scan_task.error_issues }}</span>
+      </div>
+      <div class="col-auto">
+        <span class="badge text-bg-light text-dark">Total: {{ scan_task.total_issues }}</span>
+      </div>
+    </div>
+
+    {% if throughput_issues_per_min is not None %}
+    <div class="mt-2 small text-secondary">
+      Throughput: {{ throughput_issues_per_min }} issues/min{% if throughput_uploads_per_min %} &middot; {{ throughput_uploads_per_min }} uploads/min{% endif %}
+    </div>
+    {% endif %}
+
     {% if scan_task.started_at %}
-    <p class="small text-secondary mb-1">Started: {{ scan_task.started_at }}</p>
+    <p class="small text-secondary mb-1 mt-2">Started: {{ scan_task.started_at }}</p>
     {% endif %}
     {% if scan_task.finished_at %}
     <p class="small text-secondary mb-0">Finished: {{ scan_task.finished_at }}</p>
     {% endif %}
     {% if scan_task.notes %}
-    <p class="small text-secondary mt-2 mb-0">{{ scan_task.notes|linebreaksbr }}</p>
+    <details class="mt-2">
+      <summary class="small text-secondary" style="cursor:pointer;">Notes</summary>
+      <p class="small text-secondary mt-1 mb-0" style="white-space:pre-wrap;">{{ scan_task.notes }}</p>
+    </details>
     {% endif %}
   </div>
 </div>
 
-<div class="card shadow-sm">
+<div class="card shadow-sm mb-4">
+  <div class="card-body p-4">
+    <div class="d-flex justify-content-between align-items-center mb-2">
+      <h2 class="h5 mb-0">Live debug console</h2>
+      <span class="badge text-bg-light text-dark" id="step-log-count">{{ step_logs|length }} entries</span>
+    </div>
+    <div id="step-log-console"
+         {% if scan_task.status == 'running' %}
+         hx-get="step-logs/"
+         hx-trigger="every 2s"
+         hx-swap="innerHTML"
+         {% endif %}
+         style="max-height: 400px; overflow-y: auto; font-family: monospace; font-size: 0.8rem; background: #1a1a2e; color: #e0e0e0; border-radius: 6px; padding: 12px;">
+      {% include "core/partials/scan_step_logs.html" %}
+    </div>
+  </div>
+</div>
+
+<div class="card shadow-sm mb-4">
   <div class="card-body p-4">
     <h2 class="h5 mb-3">Candidates in this scan</h2>
     {% if candidates %}
@@ -40,7 +110,10 @@
         </div>
         <div class="small text-secondary">Confidence {{ candidate.confidence_score }} | {{ candidate.get_resolution_status_display }}</div>
         {% if candidate.resolution_summary %}
-        <div class="small mt-1">{{ candidate.resolution_summary }}</div>
+        <details class="small mt-1">
+          <summary style="cursor:pointer;">Show details</summary>
+          <pre class="mt-1 p-2 bg-light rounded" style="white-space:pre-wrap; font-size:0.75rem;">{{ candidate.resolution_summary }}</pre>
+        </details>
         {% endif %}
       </li>
       {% endfor %}
@@ -51,34 +124,44 @@
   </div>
 </div>
 
-<div class="card shadow-sm mt-4">
+<div class="card shadow-sm">
   <div class="card-body p-4">
-    <h2 class="h5 mb-3">Issue review logs</h2>
-    {% if issue_logs %}
-    <div class="table-responsive">
-      <table class="table align-middle mb-0">
-        <thead>
-          <tr>
-            <th>Issue</th>
-            <th>Decision</th>
-            <th>Confidence</th>
-            <th>Reason</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for log in issue_logs %}
-          <tr>
-            <td><a href="{{ log.issue_url }}" target="_blank" rel="noopener noreferrer">#{{ log.issue_number }} {{ log.title }}</a></td>
-            <td>{{ log.get_decision_display }}</td>
-            <td>{{ log.confidence_score }}</td>
-            <td class="small">{{ log.reason }}</td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </div>
-    {% else %}
-    <p class="text-secondary mb-0">No issue review logs yet.</p>
-    {% endif %}
+    <details>
+      <summary class="h5" style="cursor:pointer;">Issue review logs ({{ issue_logs|length }})</summary>
+      {% if issue_logs %}
+      <div class="table-responsive mt-3">
+        <table class="table table-sm align-middle mb-0">
+          <thead>
+            <tr>
+              <th>Issue</th>
+              <th>Decision</th>
+              <th>Confidence</th>
+              <th>Reason</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for log in issue_logs %}
+            <tr>
+              <td><a href="{{ log.issue_url }}" target="_blank" rel="noopener noreferrer">#{{ log.issue_number }} {{ log.title }}</a></td>
+              <td>
+                {% if log.decision == 'included' %}
+                <span class="badge text-bg-success">{{ log.get_decision_display }}</span>
+                {% elif log.decision == 'error' %}
+                <span class="badge text-bg-danger">{{ log.get_decision_display }}</span>
+                {% else %}
+                <span class="badge text-bg-secondary">{{ log.get_decision_display }}</span>
+                {% endif %}
+              </td>
+              <td>{{ log.confidence_score }}</td>
+              <td class="small" style="max-width: 400px; overflow: hidden; text-overflow: ellipsis;">{{ log.reason|truncatewords:30 }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <p class="text-secondary mb-0 mt-2">No issue review logs yet.</p>
+      {% endif %}
+    </details>
   </div>
 </div>

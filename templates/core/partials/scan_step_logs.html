@@ -1,0 +1,23 @@
+{% if step_logs %}
+{% for log in step_logs %}
+<div class="mb-1" style="border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 2px;">
+  <span style="color: #6c757d;">{{ log.created_at|time:"H:i:s" }}</span>
+  {% if log.level == 'error' %}
+  <span style="color: #ff6b6b;">[ERR]</span>
+  {% elif log.level == 'warning' %}
+  <span style="color: #ffc107;">[WRN]</span>
+  {% elif log.level == 'debug' %}
+  <span style="color: #6c757d;">[DBG]</span>
+  {% else %}
+  <span style="color: #51cf66;">[INF]</span>
+  {% endif %}
+  <span style="color: #74b9ff;">[{{ log.get_phase_display }}]</span>
+  {% if log.issue_number %}
+  <span style="color: #a29bfe;">#{{ log.issue_number }}</span>
+  {% endif %}
+  <span>{{ log.message }}</span>
+</div>
+{% endfor %}
+{% else %}
+<div style="color: #6c757d;">Waiting for scan activity...</div>
+{% endif %}
