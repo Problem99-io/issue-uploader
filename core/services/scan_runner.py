@@ -1061,6 +1061,39 @@ def run_scan_task(scan_task_id: int) -> None:
                                         framework = (payload.get('framework') or '').strip()
                                         if framework:
                                             direct_payload['framework'] = framework
+                                        error_code = (payload.get('error_code') or '').strip()
+                                        if error_code:
+                                            direct_payload['error_code'] = error_code
+
+                                        tags = payload.get('tags') or []
+                                        if isinstance(tags, str):
+                                            tags = [segment.strip() for segment in tags.split(',') if segment.strip()]
+                                        elif isinstance(tags, list):
+                                            tags = [str(tag).strip() for tag in tags if str(tag).strip()]
+                                        else:
+                                            tags = []
+                                        if tags:
+                                            direct_payload['tags'] = tags
+
+                                        alternative_solutions = payload.get('alternative_solutions') or []
+                                        if isinstance(alternative_solutions, str):
+                                            alternative_solutions = [
+                                                segment.strip() for segment in alternative_solutions.split(',') if segment.strip()
+                                            ]
+                                        elif isinstance(alternative_solutions, list):
+                                            alternative_solutions = [
+                                                str(solution).strip()
+                                                for solution in alternative_solutions
+                                                if str(solution).strip()
+                                            ]
+                                        else:
+                                            alternative_solutions = []
+                                        if alternative_solutions:
+                                            direct_payload['alternative_solutions'] = alternative_solutions
+
+                                        source = (payload.get('source') or '').strip()
+                                        if source:
+                                            direct_payload['source'] = source
 
                                         upload_problem_direct(
                                             api_key=problem99_api_key,
