@@ -12,6 +12,7 @@ from core.services.ollama_client import (
     send_message,
     send_message_detailed,
 )
+from core.services.problem99_client import Problem99ServiceError, upload_problem_direct
 from core.services.scan_runner import run_scan_task
 
 
@@ -90,6 +91,46 @@ class OllamaServiceTests(TestCase):
 
         with self.assertRaises(OllamaServiceError):
             list_models('https://example.com')
+
+
+class Problem99ServiceTests(TestCase):
+    @patch('core.services.problem99_client.request.urlopen')
+    def test_upload_problem_direct_uses_admin_upload_endpoint(self, urlopen_mock):
+        response = MagicMock()
+        response.read.return_value = b'{"success": true, "solutionId": "abc123"}'
+        urlopen_mock.return_value.__enter__.return_value = response
+
+        payload = {
+            'error_message': 'AUTH-401 Unauthorized: token validation failed.',
+            'solution_code': 'return unauthorized_response()',
+            'language': 'python',
+        }
+        upload_problem_direct('p99_admin_key', payload)
+
+        req = urlopen_mock.call_args[0][0]
+        self.assertEqual(req.full_url, 'https://api.problem99.io/api/direct/admin-upload')
+        self.assertEqual(req.get_method(), 'POST')
+        self.assertEqual(req.headers.get('Authorization'), 'Bearer p99_admin_key')
+        self.assertEqual(req.headers.get('Content-type'), 'application/json')
+        self.assertIsNone(req.headers.get('X-api-key'))
+
+    @patch('core.services.problem99_client.request.urlopen')
+    def test_upload_problem_direct_raises_on_success_false_response(self, urlopen_mock):
+        response = MagicMock()
+        response.read.return_value = b'{"success": false, "error": "Admin role required", "code": "FORBIDDEN"}'
+        urlopen_mock.return_value.__enter__.return_value = response
+
+        with self.assertRaises(Problem99ServiceError) as exc:
+            upload_problem_direct(
+                'p99_non_admin_key',
+                {
+                    'error_message': 'AUTH-401 Unauthorized: token validation failed.',
+                    'solution_code': 'return unauthorized_response()',
+                    'language': 'python',
+                },
+            )
+
+        self.assertIn('Admin role required', str(exc.exception))
 
     @patch('core.services.ollama_client.Client')
     def test_send_message_returns_message_content(self, client_cls):
@@ -417,10 +458,13 @@ class ScanTaskExecutionTests(TestCase):
                 '{"include": true, "confidence": 0.91, '
                 '"error_message": "AUTH-401 Unauthorized: Token validation failed when accessing protected API endpoint", '
                 '"solution_code": "if (!token || !isValidToken(token)) {\\n  return res.status(401).json({ error: \\"Unauthorized\\" });\\n}", '
+                '"error_code": "AUTH-401", '
                 '"framework": "express", '
                 '"language": "javascript", '
                 '"explanation": "The error occurs because the authentication middleware does not validate the token before allowing access to protected routes. The fix adds a guard clause that checks for token presence and validity, returning a 401 status when authentication fails.", '
-                '"tags": ["auth", "token"]}'
+                '"tags": ["auth", "token"], '
+                '"alternative_solutions": ["Use signed session cookies"], '
+                '"source": "issue-uploader"}'
             ),
             (
                 '{"include": false, "confidence": 0.22, "error_message": "", "solution_code": "", '
@@ -443,6 +487,12 @@ class ScanTaskExecutionTests(TestCase):
         self.assertIn('"solution_code":', candidate.resolution_summary)
         self.assertIn('"tags": [', candidate.resolution_summary)
         upload_problem_direct_mock.assert_called_once()
+        upload_call = upload_problem_direct_mock.call_args.kwargs
+        self.assertEqual(upload_call['api_key'], 'p99_test')
+        self.assertEqual(upload_call['payload']['error_code'], 'AUTH-401')
+        self.assertEqual(upload_call['payload']['tags'], ['auth', 'token'])
+        self.assertEqual(upload_call['payload']['alternative_solutions'], ['Use signed session cookies'])
+        self.assertEqual(upload_call['payload']['source'], 'issue-uploader')
 
     @patch('core.services.scan_runner.find_closing_pull_request_number')
     @patch('core.services.scan_runner.send_message')

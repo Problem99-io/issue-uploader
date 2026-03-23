@@ -8,7 +8,7 @@ class Problem99ServiceError(Exception):
 
 
 def upload_problem_direct(api_key: str, payload: dict) -> dict:
-    url = 'https://api.problem99.io/api/direct/upload-problem'
+    url = 'https://api.problem99.io/api/direct/admin-upload'
     body = json.dumps(payload).encode('utf-8')
     req = request.Request(
         url,
@@ -17,7 +17,6 @@ def upload_problem_direct(api_key: str, payload: dict) -> dict:
             'Content-Type': 'application/json',
             'Accept': 'application/json',
             'Authorization': f'Bearer {api_key}',
-            'X-API-Key': api_key,
             'User-Agent': 'issue-uploader',
         },
         method='POST',
